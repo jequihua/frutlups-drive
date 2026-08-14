@@ -1,0 +1,10 @@
+schema_version = "frutlups_drive_policy_v1"
+
+[roles.architect]
+adapter = "mock"
+
+[roles.coder]
+adapter = "mock"
+
+[roles.reviewer]
+adapter = "mock"

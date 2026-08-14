@@ -1,0 +1,30 @@
+{
+  "contract": "frutlups_planning_state",
+  "version": 1,
+  "outcome": "ready",
+  "step": "frontier_recorded",
+  "actor": "human",
+  "gate_state": "open",
+  "frontier": {
+    "milestone_id": "M001",
+    "slice_id": "M001-S01",
+    "slice_title": "Package scaffold",
+    "round": 1
+  },
+  "artifacts": {
+    "coding_prompt": "prompts/for_coding_agent/001_m001_s01_package_scaffold.md",
+    "self_report": "05_governance/reviews/m001/m001_s01_self_report.md",
+    "review_prompt": "prompts/for_review_agent/002_m001_s01_review.md",
+    "review_report": "05_governance/reviews/m001/m001_s01_round1_review_report.md",
+    "verdict_record": "05_governance/reviews/m001/m001_s01_verdict_record.md"
+  },
+  "verdict": {
+    "value": "pass",
+    "next_move": "record the verdict and advance the frontier",
+    "report": "05_governance/reviews/m001/m001_s01_round1_review_report.md"
+  },
+  "blocked": null,
+  "completion_evidence": null,
+  "diagnostics": [],
+  "next_command": "python -m frutlups status . --json"
+}

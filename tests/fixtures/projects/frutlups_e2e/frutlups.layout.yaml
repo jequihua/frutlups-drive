@@ -1,0 +1,35 @@
+schema_version: frutlups_layout_config_v0
+profile_id: artifact_first_template_v3
+prompts:
+  coding_prompt_dir: "prompts/for_coding_agent"
+  review_prompt_dir: "prompts/for_review_agent"
+  coding_template: ""
+  review_template: ""
+  numbering: "global_flat_sequence"
+  pairing: "workflow_metadata"
+  section_roles:
+    self_report: "required self-report"
+  metadata:
+    parse_front_matter: true
+    milestone_field: "milestone"
+    slice_field: "slice"
+    title_field: "title"
+reports:
+  reviews_dir: "05_governance/reviews"
+  discovery: "recursive_contained"
+  self_report_suffix: "_self_report.md"
+  review_report_suffix: "_review_report.md"
+  verdict_record_suffix: "_verdict_record.md"
+  self_report_required_headings:
+    - "Intent"
+    - "Files Changed"
+    - "Behavior Implemented"
+    - "Tests Added Or Updated"
+    - "Verification Run"
+    - "Definition Of Done Audit"
+    - "Non-Goals Confirmed"
+    - "Deviations From Prompt"
+    - "Memory Used"
+    - "Memory Update Requested"
+    - "Known Limits / Follow-Up"
+    - "Recommended Next Move"

@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frutlups-drive"
+description = "Execution runtime for artifact-first agentic coding loops."
+requires-python = ">=3.11"
+dependencies = []
+dynamic = ["version"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["frutlups_drive", "frutlups_drive.dispatch"]
+
+[tool.setuptools.dynamic]
+version = {attr = "frutlups_drive.__version__"}
+
+[tool.setuptools.package-data]
+frutlups_drive = ["py.typed"]

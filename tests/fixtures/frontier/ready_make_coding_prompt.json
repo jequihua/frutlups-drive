@@ -1,0 +1,188 @@
+{
+ "accepted_slice_ids": [],
+ "active_roadmap": "03_experiments/active_roadmap_fixture.md",
+ "detailed_roadmap": "03_experiments/development_roadmap_fixture.md",
+ "diagnostics": [],
+ "layout": {
+  "config_path": "",
+  "diagnostics": [],
+  "profile": {
+   "active_roadmap_glob": "active_roadmap*.md",
+   "automation_boundary": {
+    "boundary_doc": "",
+    "may_consume": [],
+    "must_stop_on": [],
+    "runner_implemented": false
+   },
+   "coding_prompt_dir": "prompts/for_coding_agent",
+   "coding_template": "",
+   "current_truth_fields": [],
+   "development_roadmap_glob": "development_roadmap*.md",
+   "fallback_roadmap_glob": "*roadmap*.md",
+   "front_matter_milestone_field": "milestone",
+   "front_matter_slice_field": "slice",
+   "front_matter_title_field": "title",
+   "git_policy": {
+    "architect_reviewer_may_commit_at_boundary": false,
+    "auto_commit_requires_explicit_configuration": true,
+    "before_commit_requires": [],
+    "coder_may_commit_by_default": false,
+    "commit_boundary": "",
+    "commit_ready_requires": [],
+    "default": "",
+    "default_committer_role": "",
+    "must_not_bypass_stop_conditions_to_commit": true,
+    "policy_doc": "",
+    "runner_may_commit": false,
+    "runner_may_commit_when_explicitly_authorized": false,
+    "runner_may_report_commit_ready": false
+   },
+   "mode_fields": [],
+   "non_goals_section": "non-goals",
+   "parse_front_matter": false,
+   "profile_id": "artifact_first_template_legacy_root",
+   "profile_status": "proposed",
+   "pull_request_policy": {
+    "default": "",
+    "human_may_request_any_time": false,
+    "must_not_bypass_stop_conditions_to_open_pull_request": true,
+    "open_pull_request_requires_explicit_authorization": true,
+    "policy_doc": "",
+    "runner_may_open_pull_request": false,
+    "runner_may_report_pull_request_ready": false,
+    "suggested_boundary": ""
+   },
+   "required_coding_prompt_sections": [
+    "Active Roadmap Item",
+    "Required Self-Report",
+    "Required Reading",
+    "Non-Goals"
+   ],
+   "required_directories": [
+    "00_brief",
+    "03_experiments",
+    "05_governance",
+    "06_infra",
+    "08_pkg",
+    "prompts"
+   ],
+   "required_reading_section": "required reading",
+   "required_review_prompt_sections": [
+    "Review Objective",
+    "Review Checks",
+    "Verdict"
+   ],
+   "review_prompt_dir": "prompts/for_review_agent",
+   "review_report_suffix": "_review_report.md",
+   "review_template": "",
+   "reviews_dir": "05_governance/reviews",
+   "roadmap_dir": "03_experiments",
+   "roadmap_item_section": "active roadmap item",
+   "schema_version": "frutlups_layout_config_v0",
+   "self_report_required_headings": [],
+   "self_report_schema": "",
+   "self_report_section": "required self-report",
+   "self_report_suffix": "_self_report.md",
+   "state_file": "",
+   "task_section": "",
+   "template_root": ".",
+   "validation_command": "",
+   "validation_command_redesign": "",
+   "verdict_record_suffix": "_verdict_record.md",
+   "verdict_values": [
+    "pass",
+    "needs_work",
+    "blocked",
+    "override"
+   ],
+   "verification_section": ""
+  },
+  "profile_id": "artifact_first_template_legacy_root",
+  "profile_status": "proposed",
+  "schema_version": "frutlups_layout_config_v0",
+  "source": "legacy_fallback"
+ },
+ "loop_resume": {
+  "coding_prompt_path": "",
+  "diagnostics": [],
+  "frontier_slice_id": "M001-S01",
+  "frontier_slice_title": "first fixture slice",
+  "message": "no coding prompt found for M001-S01; create one",
+  "next_command": "python -m frutlups make-coding-prompt <project>",
+  "review_prompt_path": "",
+  "review_report_path": "",
+  "self_report_path": "",
+  "step": "make_coding_prompt",
+  "verdict_record_path": ""
+ },
+ "memory": {
+  "backend": "disabled",
+  "diagnostics": [],
+  "enabled": false,
+  "message": "memory backend disabled",
+  "root": null
+ },
+ "milestones": [
+  {
+   "done_criteria": [],
+   "id": "M001",
+   "status": "active",
+   "title": "First Milestone"
+  }
+ ],
+ "missing_required_directories": [
+  "06_infra",
+  "08_pkg"
+ ],
+ "next_milestone": {
+  "done_criteria": [],
+  "id": "M001",
+  "status": "active",
+  "title": "First Milestone"
+ },
+ "next_slice": {
+  "id": "M001-S01",
+  "milestone_id": "M001",
+  "title": "first fixture slice"
+ },
+ "ok": false,
+ "planning_frontier": {
+  "action": "",
+  "actor": "",
+  "block_citation": "",
+  "block_owner": "",
+  "completion_evidence": "",
+  "contract_id": "frutlups.planning_frontier",
+  "contract_version": "1",
+  "diagnostics": [
+   "declared loop step make_coding_prompt"
+  ],
+  "outcome": "ready"
+ },
+ "prompt_artifacts": [],
+ "prompt_health": {
+  "analyzed": 0,
+  "findings": [],
+  "ignored": 0,
+  "inherited": 0,
+  "ok": true,
+  "total": 0
+ },
+ "prompts": {
+  "coding_count": 0,
+  "review_count": 0
+ },
+ "root": "<project-root>",
+ "slices": [
+  {
+   "id": "M001-S01",
+   "milestone_id": "M001",
+   "title": "first fixture slice"
+  },
+  {
+   "id": "M001-S02",
+   "milestone_id": "M001",
+   "title": "second fixture slice"
+  }
+ ]
+}

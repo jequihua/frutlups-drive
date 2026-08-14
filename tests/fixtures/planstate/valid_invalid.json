@@ -1,0 +1,32 @@
+{
+  "contract": "frutlups_planning_state",
+  "version": 1,
+  "outcome": "invalid",
+  "step": null,
+  "actor": "none",
+  "gate_state": null,
+  "frontier": null,
+  "artifacts": {
+    "coding_prompt": null,
+    "self_report": null,
+    "review_prompt": null,
+    "review_report": null,
+    "verdict_record": null
+  },
+  "verdict": null,
+  "blocked": null,
+  "completion_evidence": null,
+  "diagnostics": [
+    {
+      "severity": "error",
+      "code": "state_drift",
+      "message": "PROJECT_STATE.md milestone claim contradicts roadmap projection"
+    },
+    {
+      "severity": "info",
+      "code": "recompute_hint",
+      "message": "re-run frutlups status after reconciling the projection"
+    }
+  ],
+  "next_command": null
+}

@@ -1,0 +1,64 @@
+{
+  "planstate": [
+    "planstate/001.json",
+    "planstate/002.json",
+    "planstate/003.json",
+    "planstate/004.json",
+    "planstate/005.json"
+  ],
+  "verbs": {
+    "make-review-prompt": [
+      {
+        "path": "prompts/for_review_agent/002_m001_s01_review.md",
+        "content_file": "verbs/review_prompt.md"
+      }
+    ],
+    "record-verdict": [
+      {
+        "path": "05_governance/reviews/m001/m001_s01_verdict_record.md",
+        "content_file": "verbs/verdict_record.md"
+      }
+    ]
+  },
+  "executors": {
+    "coder": [
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001/m001_s01_self_report.md",
+            "content_file": "agent/self_report.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      }
+    ],
+    "reviewer": [
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001/m001_s01_round1_review_report.md",
+            "content_file": "agent/review_report.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      }
+    ],
+    "architect": []
+  },
+  "verification": {
+    "commands": [
+      {
+        "argv": [
+          "{python}",
+          "-c",
+          "print('fixture-verified')"
+        ],
+        "cwd": ".",
+        "timeout_seconds": 60
+      }
+    ],
+    "declared_regenerated": []
+  }
+}

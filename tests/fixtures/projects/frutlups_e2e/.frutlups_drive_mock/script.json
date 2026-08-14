@@ -1,0 +1,61 @@
+{
+  "planstate": [],
+  "verbs": {},
+  "executors": {
+    "architect": [],
+    "coder": [
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001_s02_alpha_work_self_report.md",
+            "content_file": "agent/self_report_alpha.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      },
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001_s03_beta_work_self_report.md",
+            "content_file": "agent/self_report_beta.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      }
+    ],
+    "reviewer": [
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001_s02_alpha_work_review_report.md",
+            "content_file": "agent/review_pass.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      },
+      {
+        "writes": [
+          {
+            "path": "05_governance/reviews/m001_s03_beta_work_review_report.md",
+            "content_file": "agent/review_pass.md"
+          }
+        ],
+        "status": "completed",
+        "cost_usd": 0.0
+      }
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "argv": ["{python}", "-c", "print('e2e-verified')"],
+        "cwd": ".",
+        "timeout_seconds": 60
+      }
+    ],
+    "declared_regenerated": []
+  }
+}

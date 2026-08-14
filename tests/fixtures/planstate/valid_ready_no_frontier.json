@@ -1,0 +1,21 @@
+{
+  "contract": "frutlups_planning_state",
+  "version": 1,
+  "outcome": "ready",
+  "step": "no_frontier",
+  "actor": "orchestrator",
+  "gate_state": "open",
+  "frontier": null,
+  "artifacts": {
+    "coding_prompt": null,
+    "self_report": null,
+    "review_prompt": null,
+    "review_report": null,
+    "verdict_record": null
+  },
+  "verdict": null,
+  "blocked": null,
+  "completion_evidence": null,
+  "diagnostics": [],
+  "next_command": "python -m frutlups status . --json"
+}
