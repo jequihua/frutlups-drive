@@ -84,7 +84,7 @@ contract_version = "1"
 package_identity = "frutlups==0.1.0"
 layout_config = "frutlups.layout.yaml"
 read_verbs = "status"
-write_verbs = "make-coding-prompt make-review-prompt record-verdict"
+write_verbs = "declare-rework make-coding-prompt make-review-prompt record-verdict"
 timeout_seconds = 120
 max_stream_bytes = 1048576
 binding_path = "local_state/frutlups_binding.toml"
@@ -167,7 +167,7 @@ class ValidPolicyTests(PolicyTestCase):
         self.assertEqual(policy.frutlups.read_verbs, "status")
         self.assertEqual(
             policy.frutlups.write_verbs,
-            "make-coding-prompt make-review-prompt record-verdict",
+            "declare-rework make-coding-prompt make-review-prompt record-verdict",
         )
         self.assertEqual(
             policy.frutlups.binding_path, "local_state/frutlups_binding.toml"
@@ -357,7 +357,7 @@ class PolicyRefusalTests(PolicyTestCase):
         cases = (
             ('[frutlups]\nlayout_config = "../escape.yaml"\n',
              "field_value_invalid"),
-            ('[frutlups]\nlayout_config = "a\\\\b.yaml"\n',
+            ('[frutlups]\nlayout_config = "a' + chr(92) * 2 + 'b.yaml"\n',
              "field_value_invalid"),
             ('[frutlups]\nbinding_path = "elsewhere/binding.toml"\n',
              "fixed_boundary_violation"),

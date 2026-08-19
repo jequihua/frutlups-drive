@@ -43,6 +43,7 @@ from frutlups_drive.escalate import write_escalation
 from frutlups_drive.frutlupscli import (
     FrutlupsCorrectiveRound,
     FrutlupsVerbError,
+    RecoveredVerb,
 )
 from frutlups_drive.mockverbs import (
     MockVerbWriter,
@@ -50,6 +51,11 @@ from frutlups_drive.mockverbs import (
     VerbScriptExhausted,
 )
 from frutlups_drive.memory_hooks import LlloomMemoryHooks, MemoryHookFact
+from frutlups_drive.oracle import (
+    OracleRefusal,
+    reconcile_pass_boundary,
+    valid_oracle_bundle,
+)
 from frutlups_drive.planstate import (
     MockScriptExhausted,
     PlanningState,
@@ -102,6 +108,7 @@ EVENT_KINDS = (
     "fence",
     "reconciliation",
     "pass_boundary",
+    "pass_oracle",
     "holistic_review",
     "shadow_review",
     "memory_hook",
@@ -141,6 +148,20 @@ _OWNER_NOTES_RELATIVE = Path("05_governance/human_owner_notes")
 _MAX_OWNER_NOTES = 1_000
 _MAX_BOUNDARY_MEMBERS = 20_000
 _SLICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_MAX_SEAT_CONDUCT_BLOCK_BYTES = 768
+_SEAT_CONDUCT_BLOCK = (
+    b"\n\n## Seat Conduct Boundary\n\n"
+    b"Work only inside your assigned workspace. This confinement covers files, "
+    b"processes, and system state. Never enumerate the host process table to "
+    b"remediate a problem. Never kill, stop, signal, or otherwise manage any "
+    b"process, including one you believe you spawned or believe is runaway. "
+    b"Launch only the child processes required by your declared verification "
+    b"commands, and let them finish. Make no host-level changes: do not install "
+    b"software, mutate the environment or configuration, or change system "
+    b"settings. If anything outside the workspace appears wrong, including a "
+    b"suspected runaway process, busy port, or locked file, end your turn and "
+    b"report the observation in your self-report instead of acting on it.\n"
+)
 
 
 @dataclass(frozen=True)
@@ -280,6 +301,13 @@ class Supervisor:
         # Signature inspection keeps both writer contracts unchanged.
         self._verb_supports_report = (
             "review_report" in inspect.signature(verb_writer.invoke).parameters
+        )
+        self._verb_supports_context = (
+            "slice_id" in inspect.signature(verb_writer.invoke).parameters
+        )
+        self._verb_supports_rework = all(
+            name in inspect.signature(verb_writer.invoke).parameters
+            for name in ("pass_id", "rework_slices")
         )
         self._owner_snapshot_error: str | None = None
         try:
@@ -451,6 +479,8 @@ class Supervisor:
                 state=state,
             )
         if step is LoopStep.FRONTIER_RECORDED:
+            if self._frontier_unchanged(slice_id):
+                return TickResult("acted", "frontier_unchanged")
             self._queue_memory_updates(slice_id)
             self._journal(
                 "slice_complete",
@@ -516,6 +546,9 @@ class Supervisor:
         verb: str,
         state: PlanningState,
         declared: object = _DECLARED_FROM_STATE,
+        *,
+        pass_id: str | None = None,
+        rework_slices: tuple[str, ...] = (),
     ) -> TickResult:
         slice_id = state.frontier.slice_id if state.frontier else ""
         if slice_id and self._has_any_coder_evidence(slice_id):
@@ -524,13 +557,33 @@ class Supervisor:
                 return gate
         if declared is self._DECLARED_FROM_STATE:
             declared = getattr(state.artifacts, _VERB_ARTIFACT_FIELDS[verb])
+            if (
+                verb == "make-coding-prompt"
+                and state.step is LoopStep.MAKE_CODING_PROMPT
+                and self._has_any_coder_evidence(slice_id)
+            ):
+                # Released rework planning may route a needs_work chain
+                # directly back to make_coding_prompt while retaining the
+                # prior prompt as linked context. The typed write step owns a
+                # fresh target; the historical prompt path is not that target.
+                declared = None
+        if verb == "declare-rework" and not self._verb_supports_rework:
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "planning completed before the second-pass worklist",
+                state=state,
+                slice_id=rework_slices[0] if rework_slices else "",
+            )
         try:
+            kwargs: dict[str, object] = {}
+            if self._verb_supports_context:
+                kwargs["slice_id"] = slice_id or None
             if verb == "record-verdict" and self._verb_supports_report:
-                artifact = self._verb_writer.invoke(
-                    verb, declared, review_report=state.artifacts.review_report
-                )
-            else:
-                artifact = self._verb_writer.invoke(verb, declared)
+                kwargs["review_report"] = state.artifacts.review_report
+            if verb == "declare-rework":
+                kwargs["pass_id"] = pass_id
+                kwargs["rework_slices"] = rework_slices
+            artifact = self._verb_writer.invoke(verb, declared, **kwargs)
         except FrutlupsCorrectiveRound:
             # Released acceptance semantics: a non-pass report is never
             # recorded. frutlups's own typed recode_same_slice next-action
@@ -568,7 +621,15 @@ class Supervisor:
                 state=state,
             )
         relative = artifact.relative_to(self._project_root).as_posix()
-        self._journal("verb", verb=verb, artifact=relative, slice=slice_id)
+        journal_fields: dict[str, object] = {
+            "verb": verb,
+            "artifact": relative,
+            "slice": slice_id,
+        }
+        if verb == "declare-rework":
+            journal_fields["pass_id"] = pass_id
+            journal_fields["slices"] = list(rework_slices)
+        self._journal("verb", **journal_fields)
         mark_journaled = getattr(self._verb_writer, "mark_journaled", None)
         if mark_journaled is not None:
             mark_journaled(verb)
@@ -581,8 +642,17 @@ class Supervisor:
         pending = self._pending_coder_attempt(slice_id)
         if pending is not None:
             return self._finish_coder_attempt(pending, slice_id)
+        prompt_rel = state.artifacts.coding_prompt
+        report_rel = state.artifacts.self_report
+        if not prompt_rel or not report_rel:
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "execute_coding_prompt without prompt/self-report references",
+                state=state,
+                slice_id=slice_id,
+            )
         frontier_round = state.frontier.round if state.frontier else 1
-        if self._satisfied_coder_attempt(slice_id, frontier_round):
+        if self._satisfied_coder_attempt(slice_id, frontier_round, prompt_rel):
             return TickResult("acted", "coder_attempt_already_satisfied")
 
         stop = ladder.check_ladder(
@@ -598,15 +668,6 @@ class Supervisor:
                 exceeded[0], f"budget:{exceeded[1]}", state=state, slice_id=slice_id
             )
 
-        prompt_rel = state.artifacts.coding_prompt
-        report_rel = state.artifacts.self_report
-        if not prompt_rel or not report_rel:
-            return self._stop(
-                StopReason.INVALID_STATE,
-                "execute_coding_prompt without prompt/self-report references",
-                state=state,
-                slice_id=slice_id,
-            )
         return self._dispatch_and_collect(
             state,
             slice_id,
@@ -823,7 +884,9 @@ class Supervisor:
             result = self._store.read_result(attempt) or {}
             if (
                 request.get("role") != "reviewer"
-                or request.get("prompt_sha256") != prompt_sha256
+                or not self._request_matches_prompt_source(
+                    slice_id, attempt.name, request, prompt_sha256
+                )
                 or request.get("expected_artifacts") != [report_rel]
                 or result.get("status") != "completed"
                 or self._store.read_transition(attempt) != "closed"
@@ -1260,11 +1323,21 @@ class Supervisor:
     def _complete_pass(self, state: PlanningState) -> TickResult:
         missing = self._missing_worklist_slices()
         if missing:
-            return self._stop(
-                StopReason.INVALID_STATE,
-                "planning completed before the second-pass worklist",
-                state=state,
-                slice_id=missing[0],
+            active = self._active_worklist()
+            if active is None:
+                return self._stop(
+                    StopReason.INVALID_STATE,
+                    "the second-pass worklist identity is unavailable",
+                    state=state,
+                    slice_id=missing[0],
+                )
+            _, pass_number, _ = active
+            return self._invoke_verb(
+                "declare-rework",
+                state,
+                declared=None,
+                pass_id=f"holistic_pass_{pass_number:03d}",
+                rework_slices=missing,
             )
         frozen = self._ensure_pass_boundary(state)
         if isinstance(frozen, TickResult):
@@ -1274,12 +1347,25 @@ class Supervisor:
         return self._run_holistic_review(state)
 
     def _ensure_pass_boundary(self, state: PlanningState) -> bool | TickResult:
-        record = self._store.read_pass_boundary(self._run_id)
+        boundary_events = [
+            event for event in self._events if event.get("kind") == "pass_boundary"
+        ]
+        try:
+            record = self._store.read_pass_boundary(self._run_id)
+        except (OSError, UnicodeDecodeError, ValueError, RunStoreRefusal):
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pass-boundary evidence is unreadable",
+                state=state,
+            )
+        created = record is None
         if record is None:
             try:
                 evidence = _tree_inventory(
                     self._store.run_dir(self._run_id),
-                    excluded=frozenset({"pass_boundary.json"}),
+                    excluded=frozenset(
+                        {"pass_boundary.json", "pass_oracle.json"}
+                    ),
                     max_members=_MAX_BOUNDARY_MEMBERS,
                     max_file_bytes=self._policy.limits.max_run_store_bytes,
                 )
@@ -1322,16 +1408,89 @@ class Supervisor:
                 "pass-boundary evidence is missing or over-bound",
                 state=state,
             )
-        events = [event for event in self._events if event.get("kind") == "pass_boundary"]
-        if len(events) > 1 or (
-            events and events[0].get("evidence_sha256") != digest
+        if len(boundary_events) > 1 or (
+            boundary_events
+            and boundary_events[0].get("evidence_sha256") != digest
         ):
             return self._stop(
                 StopReason.INVALID_STATE,
                 "pass-boundary evidence does not match its durable fact",
                 state=state,
             )
-        if not events:
+        oracle_path = self._store.run_dir(self._run_id) / "pass_oracle.json"
+        try:
+            oracle_record = self._store.read_pass_oracle(self._run_id)
+        except RunStoreRefusal:
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pass oracle is unreadable or over-bound",
+                state=state,
+            )
+        if oracle_record is None:
+            if boundary_events:
+                return self._stop(
+                    StopReason.INVALID_STATE,
+                    "pass oracle is missing after the durable pass boundary",
+                    state=state,
+                )
+            try:
+                oracle_record = reconcile_pass_boundary(
+                    record,
+                    self._project_root,
+                    self._store.run_dir(self._run_id),
+                )
+                oracle_path = self._store.write_pass_oracle(
+                    self._run_id, oracle_record
+                )
+            except OracleRefusal:
+                return self._stop(
+                    StopReason.INVALID_STATE,
+                    "pass oracle could not be computed from readable frozen inputs",
+                    state=state,
+                )
+            except (OSError, RunStoreRefusal, ValueError):
+                return self._stop(
+                    StopReason.RUN_STORE_FULL,
+                    "pass oracle could not be persisted safely",
+                    state=state,
+                )
+        if not valid_oracle_bundle(oracle_record, self._run_id, digest):
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pass oracle identity or schema is malformed",
+                state=state,
+            )
+        try:
+            oracle_digest = _bounded_file_sha256(
+                oracle_path, self._policy.limits.max_run_store_bytes
+            )
+        except (OSError, ValueError):
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pass oracle is missing or over-bound",
+                state=state,
+            )
+        oracle_events = [
+            event for event in self._events if event.get("kind") == "pass_oracle"
+        ]
+        if len(oracle_events) > 1 or (
+            oracle_events
+            and (
+                oracle_events[0].get("oracle_sha256") != oracle_digest
+                or oracle_events[0].get("pass_boundary_sha256") != digest
+                or oracle_events[0].get("artifact") != "pass_oracle.json"
+                or oracle_events[0].get("contract_version") != 1
+                or oracle_events[0].get("run_id") != self._run_id
+                or oracle_events[0].get("observations")
+                != len(oracle_record["observations"])
+            )
+        ):
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pass oracle does not match its durable fact",
+                state=state,
+            )
+        if not boundary_events:
             controls = sum(
                 1
                 for event in self._events
@@ -1346,8 +1505,17 @@ class Supervisor:
                 evidence_members=len(record.get("evidence", ())),
                 artifact_members=len(record.get("artifacts", ())),
             )
-            return True
-        return False
+        if not oracle_events:
+            self._journal(
+                "pass_oracle",
+                artifact="pass_oracle.json",
+                contract_version=1,
+                run_id=self._run_id,
+                pass_boundary_sha256=digest,
+                oracle_sha256=oracle_digest,
+                observations=len(oracle_record["observations"]),
+            )
+        return created
 
     def _run_holistic_review(self, state: PlanningState) -> TickResult:
         if (
@@ -1369,15 +1537,20 @@ class Supervisor:
         attempt: Path | None = None
         if record is None:
             boundary_path = self._store.run_dir(self._run_id) / "pass_boundary.json"
+            oracle_path = self._store.run_dir(self._run_id) / "pass_oracle.json"
             boundary_hash = _bounded_file_sha256(
                 boundary_path, self._policy.limits.max_run_store_bytes
             )
+            oracle_hash = _bounded_file_sha256(
+                oracle_path, self._policy.limits.max_run_store_bytes
+            )
             try:
-                boundary_manifest = boundary_path.read_text(encoding="utf-8")
+                boundary_path.read_text(encoding="utf-8")
+                oracle_path.read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 return self._stop(
                     StopReason.INVALID_STATE,
-                    "frozen pass-boundary evidence is unreadable",
+                    "frozen pass-boundary evidence or oracle is unreadable",
                     state=state,
                 )
             # R2-F2: reference the frozen manifest by location and hash
@@ -1397,11 +1570,22 @@ class Supervisor:
                 + ". Read that manifest file first; it inventories every "
                 "artifact and evidence member of the completed first pass. "
                 "Verify the reviewed bytes match the hash before trusting "
-                "them. Produce exactly holistic_review.json with one JSON "
+                "them. Then read the reconciliation bundle named "
+                "pass_oracle.json at ../../../../pass_oracle.json. Its "
+                "SHA-256 is "
+                + oracle_hash
+                + ". Verify the bundle bytes match that hash before trusting "
+                "them. For each oracle observation, confirm or refute it "
+                "against the primary sources and list the implicated slice "
+                "only when the observation is confirmed. Oracle observations "
+                "are evidence, not findings or worklist authority. After "
+                "checking every observation, attack beyond the bundle with "
+                "spot-checks of judgment claims that mechanical reconciliation "
+                "cannot judge. Produce exactly holistic_review.json with one JSON "
                 "object whose findings member is a list of unique slice "
                 "identifiers. Use an empty list for a clean pass. Write "
                 "only into the assigned staging workspace; create only "
-                "holistic_review.json. Reading the manifest and the "
+                "holistic_review.json. Reading the manifest, the bundle, and the "
                 "project's reviewed artifacts is expected; write nothing "
                 "outside the project.\n"
             ).encode("utf-8")
@@ -1485,14 +1669,20 @@ class Supervisor:
             return TickResult("boundary", "complete")
         return TickResult("acted", "clean_pass")
 
-    def _active_worklist(self) -> tuple[int, tuple[str, ...]] | None:
+    def _active_worklist(self) -> tuple[int, int, tuple[str, ...]] | None:
         for index in range(len(self._events) - 1, -1, -1):
             event = self._events[index]
             if event.get("kind") != "holistic_review":
                 continue
             findings = event.get("findings")
-            if isinstance(findings, list) and findings:
-                return index, tuple(str(item) for item in findings)
+            pass_number = event.get("pass_number")
+            if (
+                isinstance(findings, list)
+                and findings
+                and type(pass_number) is int
+                and pass_number > 0
+            ):
+                return index, pass_number, tuple(str(item) for item in findings)
             return None
         return None
 
@@ -1500,11 +1690,17 @@ class Supervisor:
         active = self._active_worklist()
         if active is None:
             return ()
-        index, findings = active
+        index, _, findings = active
         completed = {
             str(event.get("slice"))
             for event in self._events[index + 1 :]
             if event.get("kind") == "slice_complete"
+            or (
+                event.get("kind") == "verb"
+                and event.get("verb") == "record-verdict"
+                and isinstance(event.get("slice"), str)
+                and bool(event.get("slice"))
+            )
         }
         return tuple(item for item in findings if item not in completed)
 
@@ -1512,7 +1708,7 @@ class Supervisor:
         active = self._active_worklist()
         if active is None:
             return None
-        _, findings = active
+        _, _, findings = active
         slice_id = state.frontier.slice_id if state.frontier else ""
         if slice_id not in findings:
             return self._stop(
@@ -1602,6 +1798,7 @@ class Supervisor:
         before = self._workspace.snapshot(lease.root)
         attempt = self._store.create_attempt(self._run_id, slice_id)
 
+        prompt_source_sha256: str | None = None
         if repair_prompt is not None:
             prompt_path = self._store.write_attempt_prompt(
                 attempt, "repair_prompt.md", repair_prompt
@@ -1617,20 +1814,26 @@ class Supervisor:
                     slice_id=slice_id,
                     attempt_id=attempt.name,
                 )
+            prompt_source_sha256 = hashlib.sha256(
+                prompt_path.read_bytes()
+            ).hexdigest()
         prompt_path = self._prompt_with_memory(attempt, prompt_path)
         request = self._build_request(
             attempt, role, access, prompt_path, expected_rel, lease
         )
         self._store.write_request(attempt, request)
-        self._journal(
-            "dispatch",
-            role=role.value,
-            slice=slice_id,
-            attempt=attempt.name,
-            repair=repair,
-            adapter=request.adapter,
-            model=request.model,
-        )
+        dispatch_fields: dict[str, object] = {
+            "role": role.value,
+            "slice": slice_id,
+            "attempt": attempt.name,
+            "repair": repair,
+            "adapter": request.adapter,
+            "model": request.model,
+        }
+        if prompt_source_sha256 is not None:
+            dispatch_fields["prompt_source"] = prompt_rel
+            dispatch_fields["prompt_source_sha256"] = prompt_source_sha256
+        self._journal("dispatch", **dispatch_fields)
         self._store.advance_transition(attempt, "started")
 
         try:
@@ -2225,8 +2428,13 @@ class Supervisor:
             )
         if recovered is None:
             return None
-        verb, artifact = recovered
-        target = artifact.relative_to(self._project_root).as_posix()
+        if not isinstance(recovered, RecoveredVerb):
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "pending governed verb recovery returned an invalid witness",
+            )
+        verb = recovered.verb
+        target = recovered.artifact.relative_to(self._project_root).as_posix()
         matching = [
             event
             for event in self._store.read_events(self._run_id)
@@ -2240,7 +2448,15 @@ class Supervisor:
                 "pending governed verb has duplicate durable journal facts",
             )
         if not matching:
-            self._journal("verb", verb=verb, artifact=target)
+            journal_fields: dict[str, object] = {
+                "verb": verb,
+                "artifact": target,
+                "slice": recovered.slice_id or "",
+            }
+            if verb == "declare-rework":
+                journal_fields["pass_id"] = recovered.pass_id
+                journal_fields["slices"] = list(recovered.rework_slices)
+            self._journal("verb", **journal_fields)
         mark_journaled = getattr(self._verb_writer, "mark_journaled", None)
         if mark_journaled is not None:
             mark_journaled(verb)
@@ -2286,6 +2502,23 @@ class Supervisor:
                 slice_id=attempt.parent.name,
                 attempt_id=attempt.name,
             )
+        source = self._prompt_source_for_attempt(
+            attempt.parent.name, attempt.name
+        )
+        if source is not None:
+            source_path = _contained_project_path(self._project_root, source[0])
+            source_sha = (
+                hashlib.sha256(source_path.read_bytes()).hexdigest()
+                if source_path is not None and source_path.is_file()
+                else ""
+            )
+            if source_sha != source[1]:
+                return self._stop(
+                    StopReason.INVALID_STATE,
+                    "stale prompt hash: external output cannot bind to a newer prompt",
+                    slice_id=attempt.parent.name,
+                    attempt_id=attempt.name,
+                )
         if transition == "started":
             self._store.advance_transition(attempt, "externally_completed")
         if self._store.read_result(attempt) is None:
@@ -2344,19 +2577,63 @@ class Supervisor:
         self._store.advance_transition(attempt, "closed")
         return TickResult("acted", "coder_attempt_completed")
 
-    def _satisfied_coder_attempt(self, slice_id: str, frontier_round: int) -> bool:
+    def _satisfied_coder_attempt(
+        self, slice_id: str, frontier_round: int, prompt_rel: str
+    ) -> bool:
         # A completed tick is replayed after a crash only when the same state
         # is re-served; a corrective round carries an incremented
         # frontier.round, so the count of verified closed attempts decides.
+        prompt = self._project_root / prompt_rel
+        if not prompt.is_file():
+            return False
+        try:
+            prompt_sha256 = hashlib.sha256(prompt.read_bytes()).hexdigest()
+        except OSError:
+            return False
         verified = 0
         for attempt in self._store.list_attempts(self._run_id, slice_id):
             if self._store.read_transition(attempt) == "closed":
+                request = self._store.read_request(attempt) or {}
                 if (
                     self._is_coder_evidence_attempt(attempt)
+                    and self._request_matches_prompt_source(
+                        slice_id, attempt.name, request, prompt_sha256
+                    )
                     and self._verification_event(slice_id, attempt.name) is True
                 ):
                     verified += 1
         return verified >= max(1, frontier_round)
+
+    def _prompt_source_for_attempt(
+        self, slice_id: str, attempt_name: str
+    ) -> tuple[str, str] | None:
+        for event in reversed(self._events):
+            if (
+                event.get("kind") == "dispatch"
+                and event.get("slice") == slice_id
+                and event.get("attempt") == attempt_name
+                and isinstance(event.get("prompt_source"), str)
+                and _sha256_text(event.get("prompt_source_sha256"))
+            ):
+                return (
+                    str(event["prompt_source"]),
+                    str(event["prompt_source_sha256"]),
+                )
+        return None
+
+    def _request_matches_prompt_source(
+        self,
+        slice_id: str,
+        attempt_name: str,
+        request: Mapping[str, object],
+        prompt_source_sha256: str,
+    ) -> bool:
+        source = self._prompt_source_for_attempt(slice_id, attempt_name)
+        if source is not None:
+            return source[1] == prompt_source_sha256
+        # Compatibility with attempts journaled before dispatch-envelope
+        # composition, whose request hash was the source prompt hash.
+        return request.get("prompt_sha256") == prompt_source_sha256
 
     # ------------------------------------------------------------- helpers
 
@@ -2416,6 +2693,7 @@ class Supervisor:
         if result.kind != "acted":
             return False
         if result.detail in (
+            "frontier_unchanged",
             "provider_failure",
             "watch_timeout",
             "verification_failed",
@@ -2423,34 +2701,52 @@ class Supervisor:
             return False
         return not result.detail.startswith("attempt_")
 
+    def _frontier_unchanged(self, slice_id: str) -> bool:
+        """Return whether the latest completion-relevant fact is this slice.
+
+        A fresh record-verdict permits one frontier completion.  With no later
+        acceptance fact, observing the same completed slice again cannot
+        advance the frontier and must consume the no-progress budget instead
+        of creating another slice-complete fact.
+        """
+
+        for event in reversed(self._events):
+            if event.get("kind") == "slice_complete":
+                return event.get("slice") == slice_id
+            if (
+                event.get("kind") == "verb"
+                and event.get("verb") == "record-verdict"
+            ):
+                return False
+        return False
+
     def _read_project_file(self, relative: str) -> str:
         path = self._project_root / relative
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
     def _prompt_with_memory(self, attempt: Path, prompt_path: Path) -> Path:
-        """Project optional context into a prompt, never into routing."""
+        """Project optional context and fixed conduct into attempt evidence."""
 
-        if self._memory_hooks is None:
-            return prompt_path
-        try:
-            result = self._memory_hooks.read_context(prompt_path.read_bytes())
-            self._journal_memory_facts(result.facts)
-            if not result.context:
-                return prompt_path
-            return self._store.write_attempt_prompt(
-                attempt,
-                "memory_prompt.md",
-                prompt_path.read_bytes() + result.context,
-            )
-        except Exception:
-            self._journal(
-                "memory_hook",
-                hook="bounded_context",
-                status="refused",
-                reason="memory_context_internal_refusal",
-                evidence="",
-            )
-            return prompt_path
+        prompt = prompt_path.read_bytes()
+        context = b""
+        if self._memory_hooks is not None:
+            try:
+                result = self._memory_hooks.read_context(prompt)
+                self._journal_memory_facts(result.facts)
+                context = result.context
+            except Exception:
+                self._journal(
+                    "memory_hook",
+                    hook="bounded_context",
+                    status="refused",
+                    reason="memory_context_internal_refusal",
+                    evidence="",
+                )
+        return self._store.write_attempt_prompt(
+            attempt,
+            "memory_prompt.md",
+            _SEAT_CONDUCT_BLOCK + prompt + context,
+        )
 
     def _queue_memory_updates(self, slice_id: str) -> None:
         if self._memory_hooks is None:

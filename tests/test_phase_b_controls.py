@@ -7,6 +7,7 @@ from pathlib import Path
 
 import _bootstrap  # noqa: F401
 
+from frutlups_drive.budget import BudgetCounters
 from frutlups_drive.contracts import StopReason
 from frutlups_drive.dispatch.mock import MockAgentAction
 from frutlups_drive.escalate import write_escalation
@@ -76,7 +77,9 @@ class PhaseBLoopTests(unittest.TestCase):
         first = scenario.supervisor.tick()
         self.assertEqual(first.detail, "pass_boundary")
         boundary_path = scenario.store.run_dir("run_001") / "pass_boundary.json"
+        oracle_path = scenario.store.run_dir("run_001") / "pass_oracle.json"
         frozen = boundary_path.read_bytes()
+        self.assertTrue(oracle_path.is_file())
         self.assertEqual(scenario.supervisor.tick().detail, "second_pass_worklist")
         self.assertEqual(scenario.supervisor.tick().detail, "coder_attempt_completed")
         self.assertEqual(scenario.supervisor.tick().detail, "continue_past_frontier")
@@ -86,11 +89,121 @@ class PhaseBLoopTests(unittest.TestCase):
         self.assertEqual(boundary_path.read_bytes(), frozen)
         events = scenario.events()
         self.assertEqual(sum(e["kind"] == "pass_boundary" for e in events), 1)
+        oracle_events = [e for e in events if e["kind"] == "pass_oracle"]
+        self.assertEqual(len(oracle_events), 1)
+        self.assertEqual(
+            set(oracle_events[0]),
+            {
+                "kind", "t", "artifact", "contract_version", "run_id",
+                "pass_boundary_sha256", "oracle_sha256", "observations",
+            },
+        )
+        self.assertEqual(oracle_events[0]["artifact"], "pass_oracle.json")
+        counters = BudgetCounters.from_events([{"kind": "run_created", "t": 1.0}])
+        before = vars(counters).copy()
+        counters.apply(oracle_events[0])
+        self.assertEqual(vars(counters), before)
         reviews = [e for e in events if e["kind"] == "holistic_review"]
         self.assertEqual([e["clean"] for e in reviews], [False, True, True])
         self.assertEqual(scenario.counters().passes_completed, 3)
         with self.assertRaises(RunStoreRefusal):
             scenario.store.write_pass_boundary("run_001", {"contract_version": 2})
+
+    def test_oracle_observations_do_not_become_a_worklist(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state()],
+            reviewer=[holistic([])],
+            policy_body=PHASE_B_POLICY,
+        )
+        index = scenario.project / "05_governance/reviews/INDEX.md"
+        missing_self_report = (
+            "05_governance/reviews/m001/missing_self_report" + ".md"
+        )
+        index.write_text(
+            index.read_text(encoding="utf-8")
+            + "| M001 | M001-S01 | 1 | "
+              f"`{missing_self_report}` | - | - | "
+              "pass | fixture |\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(scenario.supervisor.tick().detail, "pass_boundary")
+        bundle = scenario.store.read_pass_oracle("run_001")
+        self.assertTrue(bundle["observations"])
+        result = scenario.supervisor.tick()
+        self.assertEqual((result.kind, result.detail), ("acted", "clean_pass"))
+        self.assertIsNone(scenario.supervisor._active_worklist())
+        self.assertFalse(
+            any(
+                event.get("kind") == "verb"
+                and event.get("verb") == "declare-rework"
+                for event in scenario.events()
+            )
+        )
+        reviewer_dispatches = [
+            event
+            for event in scenario.events()
+            if event.get("kind") == "dispatch"
+            and event.get("role") == "reviewer"
+        ]
+        self.assertEqual(len(reviewer_dispatches), 1)
+
+    def test_holistic_prompt_carries_oracle_protocol_and_hash(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state()],
+            reviewer=[holistic([])],
+            policy_body=PHASE_B_POLICY,
+        )
+        scenario.supervisor.tick()
+        scenario.supervisor.tick()
+        attempt = scenario.store.list_attempts(
+            "run_001", "holistic_pass_001"
+        )[0]
+        prompt = (attempt / "holistic_prompt.md").read_text(encoding="utf-8")
+        oracle_event = next(
+            event for event in scenario.events() if event["kind"] == "pass_oracle"
+        )
+        self.assertIn("../../../../pass_oracle.json", prompt)
+        self.assertIn(oracle_event["oracle_sha256"], prompt)
+        self.assertIn("confirm or refute", prompt)
+        self.assertIn("primary sources", prompt)
+        self.assertIn("attack beyond the bundle", prompt)
+        self.assertIn("spot-check", prompt)
+        self.assertIn("Produce exactly holistic_review.json", prompt)
+
+    def test_missing_index_stops_before_holistic_dispatch(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state()],
+            reviewer=[holistic([])],
+            policy_body=PHASE_B_POLICY,
+        )
+        (scenario.project / "05_governance/reviews/INDEX.md").unlink()
+        result = scenario.supervisor.tick()
+        self.assertEqual(result.stop_reason, StopReason.INVALID_STATE)
+        self.assertTrue(result.escalation_path.is_file())
+        self.assertEqual(
+            scenario.store.list_attempts("run_001", "holistic_pass_001"), ()
+        )
+
+    def test_tampered_oracle_stops_before_holistic_dispatch(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state()],
+            reviewer=[holistic([])],
+            policy_body=PHASE_B_POLICY,
+        )
+        self.assertEqual(scenario.supervisor.tick().detail, "pass_boundary")
+        oracle = scenario.store.run_dir("run_001") / "pass_oracle.json"
+        oracle.write_text('{"observations":[]}\n', encoding="utf-8")
+        result = scenario.supervisor.tick()
+        self.assertEqual(result.stop_reason, StopReason.INVALID_STATE)
+        self.assertTrue(result.escalation_path.is_file())
+        self.assertEqual(
+            scenario.store.list_attempts("run_001", "holistic_pass_001"), ()
+        )
 
     def test_ready_frontier_outside_worklist_refuses(self):
         states = [
@@ -112,6 +225,42 @@ class PhaseBLoopTests(unittest.TestCase):
         scenario.supervisor.tick()
         result = scenario.supervisor.tick()
         self.assertEqual(result.stop_reason, StopReason.INVALID_STATE)
+
+    def test_worklist_drains_from_accepted_verdict_or_scripted_completion(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state()],
+            reviewer=[holistic(["M001-S01"])],
+            policy_body=PHASE_B_POLICY,
+        )
+        scenario.supervisor.tick()
+        scenario.supervisor.tick()
+        self.assertEqual(
+            scenario.supervisor._missing_worklist_slices(), ("M001-S01",)
+        )
+        scenario.supervisor._journal(
+            "verb",
+            verb="record-verdict",
+            artifact="05_governance/reviews/fresh_verdict.md",
+            slice="M001-S01",
+        )
+        self.assertEqual(scenario.supervisor._missing_worklist_slices(), ())
+
+        scenario.supervisor._journal(
+            "holistic_review",
+            pass_number=2,
+            findings=["M001-S01"],
+            clean=False,
+            attempt="",
+            slice="holistic_pass_002",
+        )
+        self.assertEqual(
+            scenario.supervisor._missing_worklist_slices(), ("M001-S01",)
+        )
+        scenario.supervisor._journal(
+            "slice_complete", slice="M001-S01", milestone="M001"
+        )
+        self.assertEqual(scenario.supervisor._missing_worklist_slices(), ())
 
     def test_new_owner_note_stops_without_interpreting_prose(self):
         scenario = Scenario(self.root, states=[payload()])

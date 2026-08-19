@@ -296,8 +296,10 @@ _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
         "read_verbs": ("fixed", "status", ("status",)),
         "write_verbs": (
             "fixed",
-            "make-coding-prompt make-review-prompt record-verdict",
-            ("make-coding-prompt make-review-prompt record-verdict",),
+            "declare-rework make-coding-prompt make-review-prompt record-verdict",
+            (
+                "declare-rework make-coding-prompt make-review-prompt record-verdict",
+            ),
         ),
         "timeout_seconds": ("positive_count", 120, ()),
         "max_stream_bytes": ("positive_count", 1_048_576, ()),
@@ -604,7 +606,7 @@ def _validate_field(
 
 
 def _canonical_policy_path(value: str) -> bool:
-    if not value or len(value) > 512 or "\\" in value or "//" in value:
+    if not value or len(value) > 512 or chr(92) in value or "//" in value:
         return False
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         return False

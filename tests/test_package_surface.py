@@ -90,7 +90,8 @@ class ExportPolicyTests(unittest.TestCase):
         # the dispatch subpackage carries the protocol, deterministic mock,
         # manual, the provider-neutral subprocess executor, and the two-seat
         # provider CLI binding. The released-frutlups boundary remains its
-        # own module.
+        # own module; M006 adds the pure holistic oracle module without a
+        # top-level export.
         modules = sorted(p.name for p in MODULE_DIR.iterdir() if p.name != "__pycache__")
         self.assertEqual(
             modules,
@@ -108,6 +109,7 @@ class ExportPolicyTests(unittest.TestCase):
                 "livegate.py",
                 "memory_hooks.py",
                 "mockverbs.py",
+                "oracle.py",
                 "planstate.py",
                 "policy.py",
                 "py.typed",

@@ -34,7 +34,7 @@ from test_subprocess_agent import RecordingRunner
 
 
 def binding_text(argv0: str, *, env_lines: str = "") -> str:
-    escaped = argv0.replace("\\", "\\\\")
+    escaped = argv0.replace(chr(92), chr(92) * 2)
     return (
         f'schema_version = "{BINDING_SCHEMA_VERSION}"\n'
         "[launch]\n"
@@ -162,13 +162,15 @@ class BindingLoaderTests(unittest.TestCase):
         )
         self.binding_path.write_bytes((exact + "#").encode("utf-8"))
         self.assert_refused("binding_oversized")
+        nul_escape = '"' + chr(92) + 'u0000"'
+        control_escape = 'tool_identity = "frutlups' + chr(92) + 'u00010.1.0"'
         for member in (
             binding_text(sys.executable).replace(
-                '"-m"', '"\\u0000"'
+                '"-m"', nul_escape
             ),
             binding_text(sys.executable).replace(
                 'tool_identity = "frutlups==0.1.0"',
-                'tool_identity = "frutlups\\u00010.1.0"',
+                control_escape,
             ),
         ):
             with self.subTest(member=member[-80:]):
@@ -271,7 +273,7 @@ class BindingLoaderTests(unittest.TestCase):
         )
         layout = self.dir / "frutlups.layout.yaml"
         layout.write_bytes(b"layout\n")
-        for package in ("C:/machine/tool", "api_key=DO-NOT-ECHO"):
+        for package in ("C:" + "/machine/tool", "api_key=DO-NOT-ECHO"):
             with self.subTest(package=package):
                 with self.assertRaises(FrutlupsBindingError) as caught:
                     build_launch_identity(
@@ -321,6 +323,7 @@ class FakeVerbRunner:
         self.stdouts = list(stdouts)
         self.exit_codes = list(exit_codes or [])
         self.calls = 0
+        self.argvs = []
 
     def run(self, argv, cwd, env, timeout_seconds, stdout_path, stderr_path,
             max_stream_bytes=1_048_576):
@@ -328,6 +331,7 @@ class FakeVerbRunner:
 
         index = self.calls
         self.calls += 1
+        self.argvs.append(tuple(argv))
         payload = self.stdouts[index] if index < len(self.stdouts) else "{}"
         Path(stdout_path).write_bytes(payload.encode("utf-8"))
         Path(stderr_path).write_bytes(b"")
@@ -397,6 +401,32 @@ class VerbWriterRefusalTests(unittest.TestCase):
             }
         )
 
+    def rework_payload(self, *, target=None, valid=True, written=False):
+        target = target or (
+            "05_governance/rework_declarations/001_holistic_pass_001.json"
+        )
+        payload = {
+            "errors": [] if valid else ["typed refusal"],
+            "valid": valid,
+            "declaration": {
+                "contract_id": "frutlups.rework_declaration",
+                "contract_version": "1",
+                "declaration_sequence": 1,
+                "pass_id": "holistic_pass_001",
+                "baseline_prompt_sequence": 6,
+                "slice_ids": ["M001-S02"],
+            },
+            "target_path": target,
+            "would_write": valid,
+        }
+        if written:
+            payload["write_result"] = {
+                "wrote": True,
+                "target_path": target,
+                "errors": [],
+            }
+        return json.dumps(payload)
+
     @staticmethod
     def progressed_state():
         return PlanningState(
@@ -405,6 +435,22 @@ class VerbWriterRefusalTests(unittest.TestCase):
             actor=None,
             gate_state=None,
             frontier=Frontier("M001", "M001-S01", "slice", 1),
+            artifacts=ArtifactPaths(None, None, None, None, None),
+            verdict=None,
+            blocked=None,
+            completion_evidence=None,
+            diagnostics=(),
+            next_command=None,
+        )
+
+    @staticmethod
+    def declared_state(slice_id="M001-S02"):
+        return PlanningState(
+            outcome=PlanOutcome.READY,
+            step=LoopStep.MAKE_CODING_PROMPT,
+            actor=None,
+            gate_state=None,
+            frontier=Frontier("M001", slice_id, "slice", 1),
             artifacts=ArtifactPaths(None, None, None, None, None),
             verdict=None,
             blocked=None,
@@ -436,6 +482,116 @@ class VerbWriterRefusalTests(unittest.TestCase):
         with self.assertRaises(FrutlupsVerbError) as caught:
             writer.invoke("orchestrator-run", None)
         self.assertEqual(caught.exception.code, "verb_not_allowed")
+
+    def test_declare_rework_uses_exact_bounded_transaction(self):
+        target = "05_governance/rework_declarations/001_holistic_pass_001.json"
+
+        class WritingRunner(FakeVerbRunner):
+            def run(runner, argv, cwd, env, timeout_seconds, stdout_path,
+                    stderr_path, max_stream_bytes=1_048_576):
+                outcome = super().run(
+                    argv, cwd, env, timeout_seconds, stdout_path, stderr_path,
+                    max_stream_bytes,
+                )
+                if "--dry-run" not in argv:
+                    written = self.project / target
+                    written.parent.mkdir(parents=True, exist_ok=True)
+                    written.write_text("{}\n", encoding="utf-8")
+                return outcome
+
+        runner = WritingRunner(
+            [self.rework_payload(), self.rework_payload(written=True)]
+        )
+        writer = self.writer(runner, status_reader=self.declared_state)
+        artifact = writer.invoke(
+            "declare-rework",
+            None,
+            pass_id="holistic_pass_001",
+            rework_slices=("M001-S03", "M001-S02"),
+        )
+        self.assertEqual(artifact, self.project / target)
+        self.assertEqual(runner.calls, 2)
+        self.assertEqual(
+            runner.argvs[0][-10:],
+            (
+                "declare-rework",
+                ".",
+                "--pass-id",
+                "holistic_pass_001",
+                "--slice",
+                "M001-S03",
+                "--slice",
+                "M001-S02",
+                "--dry-run",
+                "--json",
+            ),
+        )
+        intent = json.loads(
+            (self.dir / "store/pending_verb.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(intent["pass_id"], "holistic_pass_001")
+        self.assertEqual(intent["rework_slices"], ["M001-S03", "M001-S02"])
+
+    def test_declare_rework_request_and_target_refusals_are_fail_closed(self):
+        writer = self.writer(FakeVerbRunner([]))
+        invalid = (
+            {"pass_id": "bad", "rework_slices": ("M001-S02",)},
+            {"pass_id": "holistic_pass_001", "rework_slices": ()},
+            {
+                "pass_id": "holistic_pass_001",
+                "rework_slices": ("M001-S02", "M001-S02"),
+            },
+        )
+        for kwargs in invalid:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(FrutlupsVerbError) as caught:
+                    writer.invoke("declare-rework", None, **kwargs)
+                self.assertEqual(caught.exception.code, "verb_rework_request_invalid")
+        self.assertEqual(writer._runner.calls, 0)
+
+        escaped = self.writer(
+            FakeVerbRunner(
+                [self.rework_payload(target="05_governance/reviews/not_allowed.json")]
+            )
+        )
+        with self.assertRaises(VerbAuthorityDenied):
+            escaped.invoke(
+                "declare-rework",
+                None,
+                pass_id="holistic_pass_001",
+                rework_slices=("M001-S02",),
+            )
+
+    def test_declare_rework_post_state_must_reopen_requested_slice(self):
+        target = "05_governance/rework_declarations/001_holistic_pass_001.json"
+
+        class WritingRunner(FakeVerbRunner):
+            def run(runner, argv, cwd, env, timeout_seconds, stdout_path,
+                    stderr_path, max_stream_bytes=1_048_576):
+                outcome = super().run(
+                    argv, cwd, env, timeout_seconds, stdout_path, stderr_path,
+                    max_stream_bytes,
+                )
+                if "--dry-run" not in argv:
+                    written = self.project / target
+                    written.parent.mkdir(parents=True, exist_ok=True)
+                    written.write_text("{}\n", encoding="utf-8")
+                return outcome
+
+        writer = self.writer(
+            WritingRunner(
+                [self.rework_payload(), self.rework_payload(written=True)]
+            ),
+            status_reader=lambda: self.declared_state("M001-S03"),
+        )
+        with self.assertRaises(FrutlupsVerbError) as caught:
+            writer.invoke(
+                "declare-rework",
+                None,
+                pass_id="holistic_pass_001",
+                rework_slices=("M001-S02",),
+            )
+        self.assertEqual(caught.exception.code, "verb_post_state_contradictory")
 
     def test_nonzero_dry_run_refuses(self):
         writer = self.writer(FakeVerbRunner(["{}"], exit_codes=[3]))
@@ -616,10 +772,13 @@ class VerbWriterRefusalTests(unittest.TestCase):
         self.assertEqual(produced, self.project / target)
         self.assertTrue(intent_path.is_file(), "intent must outlive invoke()")
         staged = json.loads(intent_path.read_text(encoding="utf-8"))
-        self.assertEqual(staged["schema_version"], 1)
+        self.assertEqual(staged["schema_version"], 2)
         self.assertEqual(staged["verb"], "make-coding-prompt")
         self.assertEqual(staged["target"], target)
         self.assertFalse(staged["target_preexisted"])
+        self.assertIsNone(staged["slice_id"])
+        self.assertIsNone(staged["pass_id"])
+        self.assertEqual(staged["rework_slices"], [])
         self.assertIn("workspace_before", staged)
         self.assertIn("launch_identity", staged)
         writer.clear_intent()
@@ -732,7 +891,8 @@ class VerbWriterRefusalTests(unittest.TestCase):
         target_path.parent.mkdir(parents=True)
         target_path.write_bytes(b"review prompt\n")
         recovered = writer.reconcile_pending()
-        self.assertEqual(recovered, ("make-review-prompt", target_path))
+        self.assertEqual(recovered.verb, "make-review-prompt")
+        self.assertEqual(recovered.artifact, target_path)
         self.assertTrue((self.dir / "store/pending_verb.json").is_file())
 
     def test_recovery_rejects_deletion_accompanying_target(self):
@@ -954,7 +1114,8 @@ class VerbWriterRefusalTests(unittest.TestCase):
             ),
         )
         recovered = recovering.reconcile_pending()
-        self.assertEqual(recovered, ("make-coding-prompt", target))
+        self.assertEqual(recovered.verb, "make-coding-prompt")
+        self.assertEqual(recovered.artifact, target)
         self.assertEqual(runner.calls, 0)
         self.assertEqual(status_calls, [True])
         self.assertTrue((self.dir / "store/pending_verb.json").is_file())

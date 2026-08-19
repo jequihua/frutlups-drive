@@ -203,6 +203,13 @@ def build_project(root: Path) -> Path:
     (project / "03_experiments/roadmap.md").write_bytes(b"# Roadmap\n")
     (project / ACTIVE_ROADMAP).write_bytes(ROADMAP_BODY.encode("utf-8"))
     (project / CODING_PROMPT).write_bytes(PROMPT_BODY.encode("utf-8"))
+    (project / "05_governance/reviews/INDEX.md").write_text(
+        "# Review Index\n\n"
+        "| Milestone | Slice | Round | Self-Report | Review Prompt | "
+        "Review Report | Verdict | Commit |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        encoding="utf-8",
+    )
     return project
 
 

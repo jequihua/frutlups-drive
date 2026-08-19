@@ -7,8 +7,9 @@ One bounded module for the two production frutlups transports:
   and computes its identity hashes. It is loaded only when the committed
   policy selects the ``frutlups_cli`` provider, never contains credentials,
   and refuses before any store, attempt, verb write, or agent call.
-- :class:`FrutlupsVerbWriter` performs the three governed artifact writes —
-  ``make-coding-prompt``, ``make-review-prompt``, ``record-verdict`` — each
+- :class:`FrutlupsVerbWriter` performs the four governed artifact writes —
+  ``declare-rework``, ``make-coding-prompt``, ``make-review-prompt``, and
+  ``record-verdict`` — each
   as one dry-run → validate target → authorized real write without
   overwrite → post-effect fence → fresh-status transaction through the
   accepted bounded process runner. It never invokes ``orchestrator-run``,
@@ -32,7 +33,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from frutlups_drive.contracts import PlanOutcome
+from frutlups_drive.contracts import LoopStep, PlanOutcome
 from frutlups_drive.dispatch.subprocess_agent import (
     checked_timeout_seconds,
     observe_command,
@@ -49,7 +50,7 @@ from frutlups_drive.workspace import authorize_workspace_writes
 BINDING_SCHEMA_VERSION = "frutlups_drive_binding_v1"
 BINDING_MAX_BYTES = 65_536
 BYTECODE_HYGIENE_ENV = ("PYTHONDONTWRITEBYTECODE", "1")
-PENDING_VERB_SCHEMA_VERSION = 1
+PENDING_VERB_SCHEMA_VERSION = 2
 PENDING_VERB_MAX_BYTES = 16 * 1024 * 1024
 PENDING_VERB_MAX_MEMBERS = 100_000
 _ORDINARY_DIRECTORY_DIGEST = hashlib.sha256(b"ordinary-directory\0").hexdigest()
@@ -57,6 +58,8 @@ _ORDINARY_DIRECTORY_DIGEST = hashlib.sha256(b"ordinary-directory\0").hexdigest()
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _TOOL_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+=-]{0,63}")
 _DECLARED_IDENTITY = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+=-]{0,127}")
+_REWORK_PASS_ID = re.compile(r"holistic_pass_[0-9]{3}")
+_REWORK_SLICE_ID = re.compile(r"M[0-9]+-S[0-9]+")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _IDENTITY_MANIFEST_FIELDS = (
     ("policy_hash", "policy_hash"),
@@ -128,10 +131,13 @@ _RECORD_KINDS_KNOWN = _RECORD_KINDS_PROCEED | frozenset(
 # directory (governance state, roadmaps, arbitrary workspace files) is
 # refused before the real write regardless of what the tool proposed.
 _VERB_TARGET_PREFIXES = {
+    "declare-rework": ("05_governance/rework_declarations/",),
     "make-coding-prompt": ("prompts/for_coding_agent/",),
     "make-review-prompt": ("prompts/for_review_agent/",),
     "record-verdict": ("05_governance/reviews/",),
 }
+
+_FRUTLUPS_WRITE_VERBS = ("declare-rework",) + ORCHESTRATOR_VERBS
 
 # The loop step each verb answers; used by the post-transaction fresh-state
 # fence to detect a producer that cannot see its own governed product.
@@ -408,6 +414,9 @@ class _PendingVerb:
     target: str
     declared_path: str | None
     review_report: str | None
+    slice_id: str | None
+    pass_id: str | None
+    rework_slices: tuple[str, ...]
     workspace_before: dict[str, str]
     launch_identity: FrutlupsLaunchIdentity
 
@@ -418,14 +427,28 @@ class _PendingVerb:
             "target": self.target,
             "declared_path": self.declared_path,
             "review_report": self.review_report,
+            "slice_id": self.slice_id,
+            "pass_id": self.pass_id,
+            "rework_slices": list(self.rework_slices),
             "target_preexisted": False,
             "workspace_before": dict(sorted(self.workspace_before.items())),
             "launch_identity": self.launch_identity.manifest_facts(),
         }
 
 
+@dataclass(frozen=True)
+class RecoveredVerb:
+    """Durable journal context recovered after a governed write crash."""
+
+    verb: str
+    artifact: Path
+    slice_id: str | None
+    pass_id: str | None
+    rework_slices: tuple[str, ...]
+
+
 class FrutlupsVerbWriter:
-    """Governed three-verb writer over the released frutlups CLI.
+    """Governed four-verb writer over the released frutlups CLI.
 
     ``status_reader`` supplies the fresh-status observation that closes each
     transaction; only that fresh state proves progress. ``snapshot`` is the
@@ -623,7 +646,7 @@ class FrutlupsVerbWriter:
             raise FrutlupsVerbError(
                 "verb_intent_invalid", "the pending verb witness is not strict JSON"
             ) from None
-        expected = {
+        expected_v1 = {
             "schema_version",
             "verb",
             "target",
@@ -633,23 +656,45 @@ class FrutlupsVerbWriter:
             "workspace_before",
             "launch_identity",
         }
-        if type(payload) is not dict or set(payload) != expected or raw != canonical:
+        expected_v2 = expected_v1 | {"slice_id", "pass_id", "rework_slices"}
+        if type(payload) is not dict or raw != canonical:
             raise FrutlupsVerbError(
                 "verb_intent_invalid", "the pending verb witness is not canonical"
+            )
+        schema_version = payload.get("schema_version")
+        if (
+            type(schema_version) is not int
+            or (
+                schema_version == 1
+                and set(payload) != expected_v1
+            )
+            or (
+                schema_version == PENDING_VERB_SCHEMA_VERSION
+                and set(payload) != expected_v2
+            )
+            or schema_version not in (1, PENDING_VERB_SCHEMA_VERSION)
+        ):
+            raise FrutlupsVerbError(
+                "verb_intent_invalid", "the pending verb witness schema is invalid"
             )
         verb = payload["verb"]
         target = payload["target"]
         declared_path = payload["declared_path"]
         review_report = payload["review_report"]
+        slice_id = payload.get("slice_id")
+        pass_id = payload.get("pass_id")
+        rework_slices = payload.get("rework_slices", [])
         if (
-            payload["schema_version"] != PENDING_VERB_SCHEMA_VERSION
-            or type(payload["schema_version"]) is not int
-            or type(verb) is not str
-            or verb not in ORCHESTRATOR_VERBS
+            type(verb) is not str
+            or verb not in _FRUTLUPS_WRITE_VERBS
+            or (schema_version == 1 and verb not in ORCHESTRATOR_VERBS)
             or type(target) is not str
             or not _is_valid_artifact_reference(target)
             or (declared_path is not None and type(declared_path) is not str)
             or (review_report is not None and type(review_report) is not str)
+            or (slice_id is not None and type(slice_id) is not str)
+            or (pass_id is not None and type(pass_id) is not str)
+            or type(rework_slices) is not list
             or payload["target_preexisted"] is not False
         ):
             raise FrutlupsVerbError(
@@ -665,6 +710,34 @@ class FrutlupsVerbWriter:
         if review_report is not None and not _is_valid_artifact_reference(review_report):
             raise FrutlupsVerbError(
                 "verb_intent_invalid", "the pending review reference is invalid"
+            )
+        if slice_id is not None and not _REWORK_SLICE_ID.fullmatch(slice_id):
+            raise FrutlupsVerbError(
+                "verb_intent_invalid", "the pending slice identity is invalid"
+            )
+        if verb == "declare-rework":
+            if (
+                declared_path is not None
+                or review_report is not None
+                or slice_id is not None
+                or pass_id is None
+                or not _REWORK_PASS_ID.fullmatch(pass_id)
+                or not 1 <= len(rework_slices) <= 64
+                or any(
+                    type(item) is not str
+                    or not _REWORK_SLICE_ID.fullmatch(item)
+                    for item in rework_slices
+                )
+                or len(set(rework_slices)) != len(rework_slices)
+            ):
+                raise FrutlupsVerbError(
+                    "verb_intent_invalid",
+                    "the pending rework declaration context is invalid",
+                )
+        elif pass_id is not None or rework_slices:
+            raise FrutlupsVerbError(
+                "verb_intent_invalid",
+                "the pending ordinary verb carries rework declaration context",
             )
         workspace = payload["workspace_before"]
         if type(workspace) is not dict or len(workspace) > PENDING_VERB_MAX_MEMBERS:
@@ -702,6 +775,9 @@ class FrutlupsVerbWriter:
             target=target,
             declared_path=declared_path,
             review_report=review_report,
+            slice_id=slice_id,
+            pass_id=pass_id,
+            rework_slices=tuple(rework_slices),
             workspace_before=dict(workspace),
             launch_identity=identity,
         )
@@ -778,6 +854,18 @@ class FrutlupsVerbWriter:
                 "verb_post_state_invalid",
                 "fresh planning state is invalid and cannot certify the write",
             )
+        if pending.verb == "declare-rework":
+            if (
+                fresh.outcome is not PlanOutcome.READY
+                or fresh.step is not LoopStep.MAKE_CODING_PROMPT
+                or fresh.frontier is None
+                or fresh.frontier.slice_id not in pending.rework_slices
+            ):
+                raise FrutlupsVerbError(
+                    "verb_post_state_contradictory",
+                    "fresh planning state did not surface the declared rework worklist",
+                )
+            return
         fresh_step = fresh.step.value if fresh.step is not None else ""
         same_step = _VERB_STEPS[pending.verb] == fresh_step
         if pending.verb == "record-verdict":
@@ -793,7 +881,7 @@ class FrutlupsVerbWriter:
                 "the fresh state after the governed verb does not reflect its write",
             )
 
-    def reconcile_pending(self) -> tuple[str, Path] | None:
+    def reconcile_pending(self) -> RecoveredVerb | None:
         """Validate a surviving witness with normal-path transaction rules."""
 
         pending = self._read_intent()
@@ -810,7 +898,13 @@ class FrutlupsVerbWriter:
             return None
         self._validate_post_state(pending)
         self._check_identity()
-        return pending.verb, self._root / pending.target
+        return RecoveredVerb(
+            verb=pending.verb,
+            artifact=self._root / pending.target,
+            slice_id=pending.slice_id,
+            pass_id=pending.pass_id,
+            rework_slices=pending.rework_slices,
+        )
 
     _CAPTURE_INDEX = re.compile(r"verb_(\d{1,9})_")
 
@@ -880,7 +974,7 @@ class FrutlupsVerbWriter:
         return payload.get("valid") is not True
 
     def _proposed_target(self, verb: str, payload: dict) -> str:
-        if verb == "record-verdict":
+        if verb in ("declare-rework", "record-verdict"):
             target = payload.get("target_path")
         else:
             preview = payload.get("preview")
@@ -890,7 +984,7 @@ class FrutlupsVerbWriter:
                 "verb_target_missing",
                 f"the {verb} plan names no proposed target",
             )
-        normalized = target.replace("\\", "/")
+        normalized = target.replace(chr(92), "/")
         if not _is_valid_artifact_reference(normalized):
             raise FrutlupsVerbError(
                 "verb_target_invalid",
@@ -905,18 +999,56 @@ class FrutlupsVerbWriter:
         verb: str,
         declared_path: str | None,
         review_report: str | None = None,
+        *,
+        slice_id: str | None = None,
+        pass_id: str | None = None,
+        rework_slices: tuple[str, ...] = (),
     ) -> Path:
         """Run one governed dry-run/write/fence/re-read verb transaction."""
 
-        if verb not in ORCHESTRATOR_VERBS:
+        if verb not in _FRUTLUPS_WRITE_VERBS:
             raise FrutlupsVerbError(
                 "verb_not_allowed",
-                "only the three governed artifact verbs are sanctioned",
+                "only the four governed artifact verbs are sanctioned",
+            )
+        if slice_id is not None and not _REWORK_SLICE_ID.fullmatch(slice_id):
+            raise FrutlupsVerbError(
+                "verb_slice_identity_invalid",
+                "the governed verb slice identity is invalid",
+            )
+        if verb == "declare-rework":
+            if (
+                declared_path is not None
+                or review_report is not None
+                or slice_id is not None
+                or type(pass_id) is not str
+                or not _REWORK_PASS_ID.fullmatch(pass_id)
+                or type(rework_slices) is not tuple
+                or not 1 <= len(rework_slices) <= 64
+                or any(
+                    type(item) is not str
+                    or not _REWORK_SLICE_ID.fullmatch(item)
+                    for item in rework_slices
+                )
+                or len(set(rework_slices)) != len(rework_slices)
+            ):
+                raise FrutlupsVerbError(
+                    "verb_rework_request_invalid",
+                    "declare-rework requires one bounded holistic pass worklist",
+                )
+        elif pass_id is not None or rework_slices:
+            raise FrutlupsVerbError(
+                "verb_rework_request_invalid",
+                "ordinary governed verbs cannot carry rework declaration context",
             )
         self._check_identity()
         before = self._workspace_snapshot()
         base_argv = list(self._binding.argv_prefix) + [verb, "."]
-        if verb == "record-verdict":
+        if verb == "declare-rework":
+            base_argv += ["--pass-id", pass_id]
+            for item in rework_slices:
+                base_argv += ["--slice", item]
+        elif verb == "record-verdict":
             if not review_report or not _is_valid_artifact_reference(
                 review_report
             ):
@@ -1007,6 +1139,9 @@ class FrutlupsVerbWriter:
             target=proposed,
             declared_path=declared_path,
             review_report=review_report,
+            slice_id=slice_id,
+            pass_id=pass_id,
+            rework_slices=rework_slices,
             workspace_before=before,
             launch_identity=self._identity,
         )
@@ -1034,9 +1169,22 @@ class FrutlupsVerbWriter:
                 f"the {verb} write reported a typed refusal or no "
                 "write_result",
             )
-        if write_result.get("wrote") is not True or write_result.get(
-            "overwrote"
-        ) is not False:
+        write_facts_valid = (
+            write_result.get("wrote") is True
+            and (
+                (
+                    verb == "declare-rework"
+                    and write_result.get("target_path") == proposed
+                    and write_result.get("errors") == []
+                    and "overwrote" not in write_result
+                )
+                or (
+                    verb != "declare-rework"
+                    and write_result.get("overwrote") is False
+                )
+            )
+        )
+        if not write_facts_valid:
             raise FrutlupsVerbError(
                 "verb_write_facts_invalid",
                 f"the {verb} write_result facts do not prove one fresh write",

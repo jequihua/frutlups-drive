@@ -82,6 +82,7 @@ _VERIFICATION_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _ESCALATION_RUN_ID = re.compile(r'^run_id = "(?P<run_id>[^"]+)"$', re.MULTILINE)
 _PASS_REVIEW_NAME = re.compile(r"pass_\d{3,}_holistic\.json")
 RESOLUTION_MARKER_SUFFIX = ".resolved"
+MAX_PASS_ORACLE_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -486,6 +487,46 @@ class RunStore:
         return json.loads(
             path.read_bytes().decode("utf-8"), parse_constant=_reject_constant
         )
+
+    def write_pass_oracle(self, run_id: str, payload: Mapping[str, object]) -> Path:
+        """Publish the bounded write-once holistic reconciliation bundle."""
+        run_dir = self._existing_run_dir(run_id)
+        data = _serialized("pass_oracle_not_serializable", dict(payload))
+        if len(data) > MAX_PASS_ORACLE_BYTES:
+            raise RunStoreRefusal(
+                "pass_oracle_oversized",
+                "pass oracle exceeds its serialized byte bound",
+            )
+        path = run_dir / "pass_oracle.json"
+        _write_once(path, data, "pass_oracle_conflict")
+        return path
+
+    def read_pass_oracle(self, run_id: str) -> dict | None:
+        """Read the bundle through the same fixed byte bound used at write."""
+        path = self._existing_run_dir(run_id) / "pass_oracle.json"
+        if not path.is_file():
+            return None
+        try:
+            with open(path, "rb") as stream:
+                data = stream.read(MAX_PASS_ORACLE_BYTES + 1)
+            if len(data) > MAX_PASS_ORACLE_BYTES:
+                raise RunStoreRefusal(
+                    "pass_oracle_oversized",
+                    "pass oracle exceeds its serialized byte bound",
+                )
+            payload = json.loads(
+                data.decode("utf-8"), parse_constant=_reject_constant
+            )
+            if not isinstance(payload, dict):
+                raise ValueError
+            return payload
+        except RunStoreRefusal:
+            raise
+        except (OSError, UnicodeDecodeError, ValueError):
+            raise RunStoreRefusal(
+                "pass_oracle_unreadable",
+                "pass oracle is not bounded strict UTF-8 JSON",
+            ) from None
 
     def write_pass_review(
         self, run_id: str, pass_number: int, payload: Mapping[str, object]

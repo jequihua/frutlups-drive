@@ -30,6 +30,7 @@ from frutlups_drive.cli import (
 )
 from frutlups_drive.contracts import ExitCode, StopReason
 from frutlups_drive.frutlupscli import BINDING_SCHEMA_VERSION
+from frutlups_drive.oracle import reconcile_pass_boundary
 from frutlups_drive.policy import load_execution_policy
 from frutlups_drive.runstore import RunStore
 from frutlups_drive.workspace import WorkspaceManager
@@ -92,7 +93,7 @@ class E2EBase(unittest.TestCase):
         shutil.copytree(FIXTURE, project)
         binding = project / "local_state" / "frutlups_binding.toml"
         binding.parent.mkdir(parents=True)
-        escaped = str(FRUTLUPS_PYTHON).replace("\\", "\\\\")
+        escaped = str(FRUTLUPS_PYTHON).replace(chr(92), chr(92) * 2)
         binding.write_text(
             f'schema_version = "{BINDING_SCHEMA_VERSION}"\n'
             "[launch]\n"
@@ -152,7 +153,48 @@ class CleanPassFamilyTests(E2EBase):
         self.assertIn("frutlups_contract_id", manifest)
         self.assertIn('frutlups_tool_identity = "frutlups==0.1.1"', manifest)
         self.assertIn('frutlups_package_identity = "frutlups==0.1.1"', manifest)
-        self.assertNotIn(str(FRUTLUPS_PYTHON).replace("\\", "\\\\"), manifest)
+        self.assertNotIn(
+            str(FRUTLUPS_PYTHON).replace(chr(92), chr(92) * 2), manifest
+        )
+
+    def test_released_hyphen_verdict_chain_is_oracle_clean(self):
+        """Installed released planning and the oracle agree on its accepted seed."""
+        project = self.make_project("oracle_contract")
+        status = subprocess.run(
+            [
+                str(FRUTLUPS_PYTHON),
+                "-m",
+                "frutlups",
+                "status",
+                str(project),
+                "--json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={},
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("M001-S01", json.loads(status.stdout)["accepted_slice_ids"])
+        artifacts = WorkspaceManager(
+            project, project / ".frutlups_drive"
+        ).snapshot(project)
+        record = {
+            "contract_version": 1,
+            "run_id": "run_001",
+            "evidence": [],
+            "artifacts": [
+                {"path": path, "sha256": digest}
+                for path, digest in sorted(artifacts.items())
+            ],
+        }
+        bundle = reconcile_pass_boundary(record, project, self.tmp)
+        verdict_classes = {
+            item["class"]
+            for item in bundle["observations"]
+            if item["slice_id"] == "M001-S01"
+        }
+        self.assertEqual(verdict_classes, set())
 
     def test_declared_package_identity_mismatch_refuses_before_store(self):
         project = self.make_project()
