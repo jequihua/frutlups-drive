@@ -9,11 +9,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import _bootstrap  # noqa: F401  (sys.path bootstrap, must precede package imports)
 
 from frutlups_drive.cli import main
 from frutlups_drive.contracts import ExitCode
+from frutlups_drive.runstore import RunStoreRefusal
 
 FIXTURE_PROJECT = (
     Path(__file__).resolve().parent / "fixtures" / "projects" / "minimal_v3"
@@ -92,6 +94,30 @@ class PlanVerbTests(CliTestCase):
 
 
 class RunVerbTests(CliTestCase):
+    def test_in_run_store_refusal_stops_without_cli_refused_stderr(self):
+        project = self.copy_fixture()
+        refusal = RunStoreRefusal(
+            "cli_in_run_refusal", "representative tick refusal"
+        )
+        with patch(
+            "frutlups_drive.supervisor.Supervisor._tick_inner",
+            side_effect=refusal,
+        ):
+            code, out, err = self.invoke(
+                "run", str(project), "--until", "slice_complete"
+            )
+        self.assertEqual(code, int(ExitCode.STOPPED_WITH_ESCALATION), err)
+        self.assertIn("stopped: invalid_state", out)
+        self.assertNotIn("refused:", err)
+        escalations = list(
+            (project / ".frutlups_drive/runs/run_001/escalations").iterdir()
+        )
+        self.assertEqual(len(escalations), 1)
+        self.assertIn(
+            "cli_in_run_refusal",
+            escalations[0].read_text(encoding="utf-8"),
+        )
+
     def test_clean_run_reaches_slice_boundary_with_exit_zero(self):
         project = self.copy_fixture()
         code, out, err = self.invoke(

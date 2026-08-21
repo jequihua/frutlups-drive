@@ -235,6 +235,7 @@ class Scenario:
         run_id="run_001",
         sleep_hook=None,
         memory_hooks_factory=None,
+        role_efforts=None,
     ):
         self.root = Path(tmp_root)
         self.project = project if project is not None else build_project(self.root)
@@ -331,6 +332,7 @@ class Scenario:
             clock=self.clock,
             watch_timeout_seconds=watch_timeout,
             round4_authority=round4_authority,
+            role_efforts=role_efforts,
             memory_hooks=memory_hooks,
             sleep=sleep,
         )

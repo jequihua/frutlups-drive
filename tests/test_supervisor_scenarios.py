@@ -1,5 +1,6 @@
 """Supervisor scenario lanes: pass, repair, stops, budgets, ladder, journal."""
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,15 +10,18 @@ import _bootstrap  # noqa: F401  (sys.path bootstrap, must precede package impor
 from frutlups_drive.budget import BudgetCounters
 from frutlups_drive.contracts import StopReason
 from frutlups_drive.dispatch.mock import MockAgentAction
+from frutlups_drive.runstore import RunStore
 from frutlups_drive.supervisor import EVENT_KINDS
 
 from _scenario import (
+    CODING_PROMPT,
     DEFAULT_VERBS,
     ROADMAP_BODY,
     REVIEW_PROMPT,
     REVIEW_REPORT,
     SELF_REPORT,
     Scenario,
+    build_project,
     clean_pass_states,
     payload,
 )
@@ -87,6 +91,24 @@ class CleanPassScenarioTests(ScenarioTestCase):
         self.assertEqual(replayed.slices_completed, 1)
         self.assertEqual(replayed.coder_dispatches_for("M001-S01"), 1)
 
+    def test_round_one_dispatches_journal_default_efforts(self):
+        scenario = self.scenario(
+            states=clean_pass_states(),
+            coder=[CODER_WRITES_REPORT],
+            reviewer=[REVIEWER_WRITES_REPORT],
+            verbs=DEFAULT_VERBS,
+            role_efforts={
+                "coder": ("medium", "high"),
+                "reviewer": ("high", "max"),
+            },
+        )
+        scenario.supervisor.run_until()
+        dispatches = [e for e in scenario.events() if e["kind"] == "dispatch"]
+        self.assertEqual(
+            [(e["role"], e["effort"]) for e in dispatches],
+            [("coder", "medium"), ("reviewer", "high")],
+        )
+
     def test_attempts_reach_terminal_transitions_with_evidence(self):
         scenario, _ = self.run_clean()
         attempts = scenario.store.list_attempts("run_001", "M001-S01")
@@ -149,12 +171,26 @@ class RepairScenarioTests(ScenarioTestCase):
                     "Verdict: pass — next: record\n"),)),
             ],
             verbs=verbs,
+            role_efforts={
+                "coder": ("medium", "high"),
+                "reviewer": ("high", "xhigh"),
+            },
         )
         result = scenario.supervisor.run_until()
         self.assertEqual(result.kind, "boundary")
         counters = scenario.counters()
         self.assertEqual(counters.coder_dispatches_for("M001-S01"), 2)
         self.assertEqual(scenario.event_kinds().count("verification"), 2)
+        dispatches = [e for e in scenario.events() if e["kind"] == "dispatch"]
+        self.assertEqual(
+            [(e["role"], e["effort"]) for e in dispatches],
+            [
+                ("coder", "medium"),
+                ("reviewer", "high"),
+                ("coder", "high"),
+                ("reviewer", "xhigh"),
+            ],
+        )
 
     def test_fix_self_report_repair_carries_diagnostics_verbatim(self):
         diagnostics = (
@@ -171,6 +207,7 @@ class RepairScenarioTests(ScenarioTestCase):
                 CODER_WRITES_REPORT,
                 MockAgentAction(writes=((SELF_REPORT, "# Fixed report\n"),)),
             ],
+            role_efforts={"coder": ("medium", "high")},
         )
         first = scenario.supervisor.tick()
         second = scenario.supervisor.tick()
@@ -178,6 +215,7 @@ class RepairScenarioTests(ScenarioTestCase):
         self.assertEqual(second.kind, "acted")
         dispatches = [e for e in scenario.events() if e["kind"] == "dispatch"]
         self.assertEqual(dispatches[1]["repair"], True)
+        self.assertEqual([e["effort"] for e in dispatches], ["medium", "medium"])
         attempts = scenario.store.list_attempts("run_001", "M001-S01")
         repair_prompt = attempts[1] / "repair_prompt.md"
         text = repair_prompt.read_bytes().decode("utf-8")
@@ -185,6 +223,35 @@ class RepairScenarioTests(ScenarioTestCase):
         self.assertIn("self_report_heading_missing", text)
         self.assertIn("the report is missing 'Deviations From Prompt:'", text)
         self.assertIn("Do the fixture work.", text)
+
+    def test_corrective_round_report_repair_inherits_corrective_effort(self):
+        diagnostics = (
+            {"severity": "error", "code": "round_two_report_incomplete",
+             "message": "complete the current round report"},
+        )
+        scenario = self.scenario(
+            states=[
+                payload("ready", "execute_coding_prompt"),
+                payload("ready", "execute_coding_prompt", round_=2),
+                payload(
+                    "ready", "fix_self_report", round_=2,
+                    diagnostics=diagnostics,
+                ),
+            ],
+            coder=[
+                CODER_WRITES_REPORT,
+                MockAgentAction(writes=((SELF_REPORT, "# Round two\n"),)),
+                MockAgentAction(writes=((SELF_REPORT, "# Round two fixed\n"),)),
+            ],
+            role_efforts={"coder": ("medium", "high")},
+        )
+        for _ in range(3):
+            self.assertEqual(scenario.supervisor.tick().kind, "acted")
+        dispatches = [e for e in scenario.events() if e["kind"] == "dispatch"]
+        self.assertEqual(
+            [(e["repair"], e["effort"]) for e in dispatches],
+            [(False, "medium"), (False, "high"), (True, "high")],
+        )
 
     def test_repair_exhaustion_stops(self):
         diagnostics = (
@@ -712,10 +779,141 @@ class BudgetScenarioTests(ScenarioTestCase):
 
 
 class LadderScenarioTests(ScenarioTestCase):
+    def test_accepted_history_does_not_consume_fresh_rework_ladder_rounds(self):
+        project = build_project(self.tmp)
+        store = RunStore(project / ".frutlups_drive")
+        store.create_run(
+            "run_001", {"boundary": "slice_complete", "contract_version": 1}
+        )
+        coding_bytes = (project / CODING_PROMPT).read_bytes()
+        boundary = store.write_pass_boundary(
+            "run_001",
+            {
+                "contract_version": 1,
+                "run_id": "run_001",
+                "evidence": [],
+                "artifacts": [
+                    {
+                        "path": CODING_PROMPT,
+                        "sha256": hashlib.sha256(coding_bytes).hexdigest(),
+                    }
+                ],
+            },
+        )
+        for event in (
+            {"kind": "run_created", "t": 900.0, "boundary": "slice_complete"},
+            {"kind": "dispatch", "t": 901.0, "role": "coder",
+             "slice": "M001-S01", "repair": False},
+            {"kind": "collected", "t": 902.0, "role": "coder",
+             "slice": "M001-S01", "status": "completed", "cost_usd": None},
+            {"kind": "verb", "t": 903.0, "verb": "record-verdict",
+             "slice": "M001-S01", "artifact": "accepted_verdict.md"},
+            {"kind": "pass_boundary", "t": 903.5,
+             "evidence_sha256": hashlib.sha256(boundary.read_bytes()).hexdigest(),
+             "evidence_members": 0, "artifact_members": 1},
+            {"kind": "verb", "t": 904.0, "verb": "declare-rework",
+             "slice": "", "pass_id": "holistic_pass_001",
+             "slices": ["M001-S01"]},
+        ):
+            store.append_event("run_001", event)
+
+        scenario = self.scenario(
+            project=project,
+            states=[
+                payload("ready", "execute_coding_prompt", round_=1),
+                payload("ready", "execute_coding_prompt", round_=2),
+            ],
+            coder=[CODER_WRITES_REPORT, CODER_WRITES_REPORT],
+            role_efforts={"coder": ("medium", "high")},
+        )
+
+        first = scenario.supervisor.tick()
+        second = scenario.supervisor.tick()
+        self.assertEqual((first.kind, first.detail), ("acted", "coder_attempt_completed"))
+        self.assertEqual(
+            (second.kind, second.detail),
+            ("acted", "coder_attempt_completed"),
+            scenario.events(),
+        )
+        counters = scenario.counters()
+        self.assertEqual(counters.lifecycle_coder_collected_for("M001-S01"), 2)
+        self.assertEqual(counters.coder_collected_for("M001-S01"), 3)
+        self.assertEqual(counters.coder_dispatches_for("M001-S01"), 3)
+        fresh_dispatches = [
+            event for event in scenario.events()
+            if event.get("kind") == "dispatch" and event.get("t", 0) > 904.0
+        ]
+        self.assertEqual(
+            [event["effort"] for event in fresh_dispatches],
+            ["medium", "high"],
+        )
+
     def test_ladder_round3_stop(self):
         states = [payload("ready", "execute_coding_prompt", round_=3)]
         scenario = self.scenario(states=states, coder=[CODER_WRITES_REPORT])
         self.assert_stop(scenario.supervisor.run_until(), StopReason.LADDER_ROUND3)
+
+    def test_ladder_round3_escalation_carries_chain_and_mandatory_fork(self):
+        project = build_project(self.tmp)
+        store = RunStore(project / ".frutlups_drive")
+        store.create_run(
+            "run_001", {"boundary": "slice_complete", "contract_version": 1}
+        )
+        for event in (
+            {"kind": "run_created", "t": 1.0, "boundary": "slice_complete"},
+            {"kind": "dispatch", "t": 2.0, "role": "coder",
+             "slice": "M001-S01", "attempt": "attempt_001", "repair": False,
+             "adapter": "codex_cli", "model": "gpt-5.6-sol",
+             "effort": "medium", "prompt_source": CODING_PROMPT},
+            {"kind": "collected", "t": 3.0, "role": "coder",
+             "slice": "M001-S01", "status": "completed", "cost_usd": None},
+            {"kind": "dispatch", "t": 4.0, "role": "reviewer",
+             "slice": "M001-S01", "attempt": "attempt_002", "repair": False,
+             "adapter": "kimi_cli", "model": "kimi-code/k3",
+             "effort": "high", "prompt_source": REVIEW_PROMPT},
+            {"kind": "dispatch", "t": 5.0, "role": "coder",
+             "slice": "M001-S01", "attempt": "attempt_003", "repair": False,
+             "adapter": "codex_cli", "model": "gpt-5.6-sol",
+             "effort": "high", "prompt_source": CODING_PROMPT},
+            {"kind": "collected", "t": 6.0, "role": "coder",
+             "slice": "M001-S01", "status": "completed", "cost_usd": None},
+        ):
+            store.append_event("run_001", event)
+        state = payload(
+            "ready", "execute_coding_prompt", round_=3,
+            review_prompt=REVIEW_PROMPT, review_report=REVIEW_REPORT,
+            verdict={"value": "needs_work", "next_move": "repair",
+                     "report": REVIEW_REPORT},
+        )
+        scenario = self.scenario(project=project, states=[state])
+        result = scenario.supervisor.run_until()
+        self.assert_stop(result, StopReason.LADDER_ROUND3)
+        text = result.escalation_path.read_text(encoding="utf-8")
+        for expected in (
+            "Active Lifecycle Chain",
+            "round 1",
+            "round 2",
+            "codex_cli/gpt-5.6-sol effort=medium",
+            "codex_cli/gpt-5.6-sol effort=high",
+            "kimi_cli/kimi-code/k3 effort=high",
+            "verdict.value=needs_work",
+            CODING_PROMPT,
+            REVIEW_PROMPT,
+            REVIEW_REPORT,
+            "product-plane code defects",
+            "envelope-expansion change control",
+            "evidence/documentation-plane issues",
+            "before any resume",
+        ):
+            self.assertIn(expected, text)
+
+    def test_non_ladder_escalation_has_no_reassessment_fork(self):
+        scenario = self.scenario(states=[payload("invalid", None)])
+        result = scenario.supervisor.run_until()
+        self.assert_stop(result, StopReason.INVALID_STATE)
+        text = result.escalation_path.read_text(encoding="utf-8")
+        self.assertNotIn("Active Lifecycle Chain", text)
+        self.assertNotIn("envelope-expansion change control", text)
 
     def test_ladder_round4_unauthorized(self):
         states = [payload("ready", "execute_coding_prompt", round_=4)]

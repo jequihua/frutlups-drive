@@ -1,12 +1,14 @@
 """Mechanical convergence-ladder cap (architecture contract §9, owner ruling).
 
 The runner never computes invariant-level recurrence; it enforces the
-conservative mechanical over-approximation: the effective round is the higher
-of the planning state's scripted frontier round and the run store's corrective
-coder-dispatch count for the slice (the dispatch about to happen included).
-Round 3 stops for architect reassessment; round 4 or later requires an
-explicitly injected recorded human authorization and refuses conservatively
-without it.
+conservative mechanical over-approximation within the active acceptance
+lifecycle. The effective round is the higher of the planning state's scripted
+frontier round and the lifecycle-scoped run-store corrective coder-dispatch
+count for the slice (the dispatch about to happen included). A governed
+``declare-rework`` transaction that re-opens an accepted slice starts a fresh
+lifecycle count. Round 3 stops for architect reassessment; round 4 or later
+requires an explicitly injected recorded human authorization and refuses
+conservatively without it.
 """
 
 from __future__ import annotations

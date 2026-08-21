@@ -54,6 +54,7 @@ from frutlups_drive.memory_hooks import LlloomMemoryHooks, MemoryHookFact
 from frutlups_drive.oracle import (
     OracleRefusal,
     reconcile_pass_boundary,
+    rework_protected_artifact,
     valid_oracle_bundle,
 )
 from frutlups_drive.planstate import (
@@ -68,7 +69,11 @@ from frutlups_drive.reconciliation import (
     ReconciliationRefusal,
     ReconciliationWriter,
 )
-from frutlups_drive.runstore import RunStore, RunStoreRefusal
+from frutlups_drive.runstore import (
+    TRANSITION_STATES,
+    RunStore,
+    RunStoreRefusal,
+)
 from frutlups_drive.verifier import (
     VerificationPlan,
     Verifier,
@@ -149,6 +154,9 @@ _MAX_OWNER_NOTES = 1_000
 _MAX_BOUNDARY_MEMBERS = 20_000
 _SLICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _MAX_SEAT_CONDUCT_BLOCK_BYTES = 768
+_MAX_REWORK_ENVELOPE_BYTES = 4_096
+_STOP_JOURNAL_ATTEMPTED = "_frutlups_stop_journal_attempted"
+_REFUSAL_ROUTING_ATTEMPTED = "_frutlups_refusal_routing_attempted"
 _SEAT_CONDUCT_BLOCK = (
     b"\n\n## Seat Conduct Boundary\n\n"
     b"Work only inside your assigned workspace. This confinement covers files, "
@@ -262,7 +270,7 @@ class Supervisor:
         clock: Clock,
         watch_timeout_seconds: float = 300.0,
         round4_authority: Callable[[], bool] | None = None,
-        role_efforts: Mapping[str, str] | None = None,
+        role_efforts: Mapping[str, str | tuple[str, str]] | None = None,
         max_call_cost_usd: float | None = None,
         max_total_cost_usd: float | None = None,
         external_dispatch_guard: Callable[[], None] | None = None,
@@ -286,7 +294,18 @@ class Supervisor:
         self._clock = clock
         self._watch_timeout = watch_timeout_seconds
         self._round4_authority = round4_authority or (lambda: False)
-        self._role_efforts = dict(role_efforts or {})
+        self._role_efforts: dict[str, tuple[str, str]] = {}
+        for role_name, declared in (role_efforts or {}).items():
+            if isinstance(declared, str):
+                self._role_efforts[role_name] = (declared, declared)
+            elif (
+                isinstance(declared, (tuple, list))
+                and len(declared) == 2
+                and all(isinstance(item, str) for item in declared)
+            ):
+                self._role_efforts[role_name] = (declared[0], declared[1])
+            else:
+                raise ValueError("role effort schedule must contain two strings")
         self._max_call_cost_usd = max_call_cost_usd
         self._max_total_cost_usd = max_total_cost_usd
         self._external_dispatch_guard = external_dispatch_guard
@@ -322,7 +341,13 @@ class Supervisor:
 
     def run_until(self) -> TickResult:
         for _ in range(10_000):
-            result = self.tick()
+            try:
+                result = self.tick()
+            except RunStoreRefusal as refusal:
+                # ``tick`` owns the ordinary boundary. This second guard
+                # keeps the loop safe if a substituted/overridden tick leaks
+                # the typed refusal, while never retrying a dead stop journal.
+                result = self._run_store_refusal_stop(refusal)
             if result.kind != "acted":
                 return result
         raise RuntimeError("supervisor exceeded the tick safety cap")
@@ -345,6 +370,12 @@ class Supervisor:
 
     def tick(self) -> TickResult:
         self._consumed_read = False
+        try:
+            return self._tick_and_record()
+        except RunStoreRefusal as refusal:
+            return self._run_store_refusal_stop(refusal)
+
+    def _tick_and_record(self) -> TickResult:
         result = self._tick_inner()
         if result.kind in ("acted", "boundary"):
             control = self._enforce_run_store()
@@ -367,6 +398,30 @@ class Supervisor:
             progress=progress,
         )
         return result
+
+    def _run_store_refusal_stop(
+        self, refusal: RunStoreRefusal
+    ) -> TickResult:
+        if getattr(refusal, _STOP_JOURNAL_ATTEMPTED, False) or getattr(
+            refusal, _REFUSAL_ROUTING_ATTEMPTED, False
+        ):
+            raise refusal
+        try:
+            return self._stop(
+                StopReason.INVALID_STATE,
+                f"run-store refusal {refusal.code}: {refusal.message}",
+                decision=(
+                    f"Inspect run-store refusal '{refusal.code}' "
+                    f"({refusal.message}) and its attempt/journal evidence. "
+                    "Resume only after the store and project evidence are "
+                    "internally consistent."
+                ),
+            )
+        except RunStoreRefusal as routed:
+            # One routing attempt is the bound even when escalation storage,
+            # rather than append_event itself, is the dead store surface.
+            setattr(routed, _REFUSAL_ROUTING_ATTEMPTED, True)
+            raise
 
     def _tick_inner(self) -> TickResult:
         if killswitch.stop_requested(self._store.root):
@@ -657,7 +712,7 @@ class Supervisor:
 
         stop = ladder.check_ladder(
             frontier_round,
-            self._counters.coder_collected_for(slice_id),
+            self._counters.lifecycle_coder_collected_for(slice_id),
             self._round4_authority(),
         )
         if stop is not None:
@@ -742,7 +797,7 @@ class Supervisor:
             return self._finish_coder_attempt(pending, slice_id)
         stop = ladder.check_ladder(
             state.frontier.round if state.frontier else 1,
-            self._counters.coder_collected_for(slice_id),
+            self._counters.lifecycle_coder_collected_for(slice_id),
             self._round4_authority(),
         )
         if stop is not None:
@@ -951,10 +1006,11 @@ class Supervisor:
             (_SHADOW_REVIEW,),
             lease,
             seat=seat,
+            effort="",
         )
         self._store.write_request(attempt, request)
         dispatched_at = self._clock.now()
-        self._store.advance_transition(attempt, "started")
+        self._advance_transition(attempt, "started")
         status = "failed"
         result: AgentRunResult | None = None
         try:
@@ -964,7 +1020,7 @@ class Supervisor:
             if log_path.is_file():
                 self._store.write_provider_events(attempt, log_path.read_bytes())
             self._store.write_result(attempt, result)
-            self._store.advance_transition(attempt, "collected")
+            self._advance_transition(attempt, "collected")
             if result.status == "completed":
                 output = staging / _SHADOW_REVIEW
                 try:
@@ -999,6 +1055,7 @@ class Supervisor:
             role="shadow_reviewer",
             adapter=seat.adapter,
             model=seat.model,
+            effort=request.effort,
             dispatched=True,
             dispatched_at=dispatched_at,
             completed_at=completed_at,
@@ -1007,8 +1064,8 @@ class Supervisor:
             tokens_out=result.tokens_out if result is not None else None,
             cost_usd=result.cost_usd if result is not None else None,
         )
-        self._store.advance_transition(attempt, "validated")
-        self._store.advance_transition(attempt, "closed")
+        self._advance_transition(attempt, "validated")
+        self._advance_transition(attempt, "closed")
 
     def _reconcile(self, state: PlanningState) -> TickResult:
         try:
@@ -1095,7 +1152,7 @@ class Supervisor:
                         slice=slice_id,
                         progress=False,
                     )
-                    self._store.advance_transition(attempt, "closed")
+                    self._advance_transition(attempt, "closed")
                     return self._stop(
                         StopReason.NO_PROGRESS,
                         f"reconciliation proposal refused: {refusal.code}",
@@ -1103,7 +1160,7 @@ class Supervisor:
                         slice_id=slice_id,
                         attempt_id=attempt.name,
                     )
-                self._store.advance_transition(attempt, "closed")
+                self._advance_transition(attempt, "closed")
                 headroom = self._gate.check_reconciliation(
                     self._counters, slice_id
                 )
@@ -1146,8 +1203,8 @@ class Supervisor:
                 after_sha256=applied.after_sha256,
                 progress=True,
             )
-            self._store.advance_transition(attempt, "validated")
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "validated")
+            self._advance_transition(attempt, "closed")
             return self._reconciliation_post_read(
                 state, slice_id, attempt.name
             )
@@ -1188,6 +1245,12 @@ class Supervisor:
             prompt_path,
             (output_name,),
             lease,
+            effort=self._effort_for_dispatch(
+                role,
+                slice_id,
+                repair=False,
+                frontier_round=state.frontier.round if state.frontier else 1,
+            ),
         )
         self._store.write_request(attempt, request)
         self._journal(
@@ -1198,14 +1261,15 @@ class Supervisor:
             repair=False,
             adapter=request.adapter,
             model=request.model,
+            effort=request.effort,
         )
-        self._store.advance_transition(attempt, "started")
+        self._advance_transition(attempt, "started")
         try:
             result = self._execute(request, attempt)
         except WorkspaceAuthorityDenied as denied:
             return self._authority_stop(denied, state, slice_id, attempt)
         except CostAuthorizationExceeded:
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.BUDGET_EXHAUSTED,
                 "budget:cost_authorization",
@@ -1217,7 +1281,7 @@ class Supervisor:
             return TickResult("acted", "provider_failure")
         self._collect(attempt, result, role.value, slice_id)
         if result.status != "completed":
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return TickResult("acted", f"attempt_{result.status}")
         watch = self._watcher.wait_for(
             [staging / output_name],
@@ -1226,7 +1290,7 @@ class Supervisor:
             stop_requested=lambda: killswitch.stop_requested(self._store.root),
         )
         if not watch.ok:
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             if watch.stop_requested:
                 return self._stop(
                     StopReason.KILL_SWITCH,
@@ -1248,7 +1312,7 @@ class Supervisor:
             or output.is_symlink()
             or not output.is_file()
         ):
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "staged output shape violated its single-file authority",
@@ -1438,6 +1502,7 @@ class Supervisor:
                     record,
                     self._project_root,
                     self._store.run_dir(self._run_id),
+                    index_mode=self._policy.index_mode,
                 )
                 oracle_path = self._store.write_pass_oracle(
                     self._run_id, oracle_record
@@ -1454,7 +1519,12 @@ class Supervisor:
                     "pass oracle could not be persisted safely",
                     state=state,
                 )
-        if not valid_oracle_bundle(oracle_record, self._run_id, digest):
+        if not valid_oracle_bundle(
+            oracle_record,
+            self._run_id,
+            digest,
+            self._policy.index_mode,
+        ):
             return self._stop(
                 StopReason.INVALID_STATE,
                 "pass oracle identity or schema is malformed",
@@ -1560,6 +1630,20 @@ class Supervisor:
             # workspace to the run directory is a structural constant of
             # the store layout, keeping prompt bytes deterministic across
             # hosts and roots; the hash keeps the reviewed bytes exact.
+            if self._policy.index_mode == "no-ledger":
+                index_protocol = (
+                    "Declared reviews INDEX mode: no-ledger. The ledger is "
+                    "kept by nobody and the frozen manifest is routing truth; "
+                    "unindexed-artifact complaints are absent by contract, "
+                    "and any ledger_row_in_no_ledger_project observation is "
+                    "high-priority. "
+                )
+            else:
+                index_protocol = (
+                    "Declared reviews INDEX mode: human-ledger. The INDEX is "
+                    "an authored ledger and both index-to-manifest and "
+                    "manifest-to-index checks remain live. "
+                )
             prompt = (
                 "# Holistic Pass Review\n\nReview the frozen first-pass "
                 "evidence manifest: the file named pass_boundary.json in "
@@ -1575,10 +1659,15 @@ class Supervisor:
                 "SHA-256 is "
                 + oracle_hash
                 + ". Verify the bundle bytes match that hash before trusting "
-                "them. For each oracle observation, confirm or refute it "
+                "them. "
+                + index_protocol
+                + "An observation annotation is a pointer requiring "
+                "confirmation against primary sources, never a pre-judgment. "
+                "For each oracle observation, confirm or refute it "
                 "against the primary sources and list the implicated slice "
                 "only when the observation is confirmed. Oracle observations "
-                "are evidence, not findings or worklist authority. After "
+                "are evidence, not findings or worklist authority. "
+                "holistic_review.json remains the sole worklist authority. After "
                 "checking every observation, attack beyond the bundle with "
                 "spot-checks of judgment claims that mechanical reconciliation "
                 "cannot judge. Produce exactly holistic_review.json with one JSON "
@@ -1616,7 +1705,7 @@ class Supervisor:
                 }
                 self._store.write_pass_review(self._run_id, pass_number, record)
             except (OSError, UnicodeDecodeError, ValueError, RunStoreRefusal):
-                self._store.advance_transition(attempt, "closed")
+                self._advance_transition(attempt, "closed")
                 return self._stop(
                     StopReason.INVALID_STATE,
                     "holistic review output is not a bounded slice worklist",
@@ -1647,8 +1736,8 @@ class Supervisor:
             slice=f"holistic_pass_{pass_number:03d}",
         )
         if attempt is not None:
-            self._store.advance_transition(attempt, "validated")
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "validated")
+            self._advance_transition(attempt, "closed")
         if findings:
             return TickResult("acted", "second_pass_worklist")
         consecutive = 0
@@ -1797,6 +1886,8 @@ class Supervisor:
         )
         before = self._workspace.snapshot(lease.root)
         attempt = self._store.create_attempt(self._run_id, slice_id)
+        rework_snapshot: dict | None = None
+        rework_envelope = b""
 
         prompt_source_sha256: str | None = None
         if repair_prompt is not None:
@@ -1806,7 +1897,7 @@ class Supervisor:
         else:
             prompt_path = self._project_root / prompt_rel
             if not prompt_path.is_file():
-                self._store.advance_transition(attempt, "closed")
+                self._advance_transition(attempt, "closed")
                 return self._stop(
                     StopReason.INVALID_STATE,
                     "referenced prompt artifact does not exist",
@@ -1817,9 +1908,33 @@ class Supervisor:
             prompt_source_sha256 = hashlib.sha256(
                 prompt_path.read_bytes()
             ).hexdigest()
-        prompt_path = self._prompt_with_memory(attempt, prompt_path)
+        if role is Role.CODER and not repair and self._declared_rework(slice_id):
+            prepared = self._prepare_rework_turn(
+                state,
+                slice_id,
+                attempt,
+                lease,
+                expected_rel,
+            )
+            if isinstance(prepared, TickResult):
+                return prepared
+            rework_snapshot, rework_envelope = prepared
+        prompt_path = self._prompt_with_memory(
+            attempt, prompt_path, envelope=rework_envelope
+        )
         request = self._build_request(
-            attempt, role, access, prompt_path, expected_rel, lease
+            attempt,
+            role,
+            access,
+            prompt_path,
+            expected_rel,
+            lease,
+            effort=self._effort_for_dispatch(
+                role,
+                slice_id,
+                repair=repair,
+                frontier_round=state.frontier.round if state.frontier else 1,
+            ),
         )
         self._store.write_request(attempt, request)
         dispatch_fields: dict[str, object] = {
@@ -1829,19 +1944,20 @@ class Supervisor:
             "repair": repair,
             "adapter": request.adapter,
             "model": request.model,
+            "effort": request.effort,
         }
         if prompt_source_sha256 is not None:
             dispatch_fields["prompt_source"] = prompt_rel
             dispatch_fields["prompt_source_sha256"] = prompt_source_sha256
         self._journal("dispatch", **dispatch_fields)
-        self._store.advance_transition(attempt, "started")
+        self._advance_transition(attempt, "started")
 
         try:
             result = self._execute(request, attempt)
         except WorkspaceAuthorityDenied as denied:
             return self._authority_stop(denied, state, slice_id, attempt)
         except CostAuthorizationExceeded:
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.BUDGET_EXHAUSTED,
                 "budget:cost_authorization",
@@ -1854,7 +1970,14 @@ class Supervisor:
 
         if result.status != "completed":
             self._collect(attempt, result, role.value, slice_id)
-            self._store.advance_transition(attempt, "closed")
+            violations = self._rework_snapshot_violations(
+                lease.root, rework_snapshot
+            )
+            if violations:
+                return self._rework_path_stop(
+                    state, slice_id, attempt, violations
+                )
+            self._advance_transition(attempt, "closed")
             return TickResult("acted", f"attempt_{result.status}")
 
         # Transport completion is a durable collection boundary even when
@@ -1866,10 +1989,19 @@ class Supervisor:
             self._watch_timeout,
             poll_seconds=self._policy.limits.watch_poll_seconds,
             stop_requested=lambda: killswitch.stop_requested(self._store.root),
+            protected_changed=(
+                lambda: bool(
+                    self._rework_snapshot_violations(
+                        lease.root, rework_snapshot
+                    )
+                )
+                if rework_snapshot is not None
+                else None
+            ),
         )
         if not watch.ok:
             if watch.stop_requested:
-                self._store.advance_transition(attempt, "closed")
+                self._advance_transition(attempt, "closed")
                 return self._stop(
                     StopReason.KILL_SWITCH,
                     "stop sentinel observed during artifact watch",
@@ -1878,9 +2010,24 @@ class Supervisor:
                     attempt_id=attempt.name,
                     decision="Remove the STOP sentinel to allow resumption.",
                 )
+            if watch.protected_change:
+                violations = self._rework_snapshot_violations(
+                    lease.root, rework_snapshot
+                )
+                return self._rework_path_stop(
+                    state, slice_id, attempt, violations
+                )
             self._journal("watch_timeout", attempt=attempt.name)
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return TickResult("acted", "watch_timeout")
+
+        violations = self._rework_snapshot_violations(
+            lease.root, rework_snapshot
+        )
+        if violations:
+            return self._rework_path_stop(
+                state, slice_id, attempt, violations
+            )
 
         after = self._workspace.snapshot(lease.root)
         self._store.write_diff_manifest(
@@ -1904,7 +2051,7 @@ class Supervisor:
                     {"code": v.code, "path": v.path} for v in violations
                 ],
             )
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "attempt violated its workspace authority fence",
@@ -1917,9 +2064,212 @@ class Supervisor:
             verified = self._run_verification(attempt, lease, slice_id)
             if isinstance(verified, TickResult):
                 return verified
-        self._store.advance_transition(attempt, "validated")
-        self._store.advance_transition(attempt, "closed")
+        self._advance_transition(attempt, "validated")
+        self._advance_transition(attempt, "closed")
         return TickResult("acted", f"{role.value}_attempt_completed")
+
+    def _declared_rework(self, slice_id: str) -> bool:
+        """Replay whether the slice is inside a journaled rework lifecycle."""
+
+        for event in self._events:
+            slices = event.get("slices")
+            if (
+                event.get("kind") == "verb"
+                and event.get("verb") == "declare-rework"
+                and isinstance(slices, list)
+                and slice_id in slices
+            ):
+                return True
+        return False
+
+    def _prepare_rework_turn(
+        self,
+        state: PlanningState,
+        slice_id: str,
+        attempt: Path,
+        lease: WorkspaceLease,
+        expected_rel: tuple[str, ...],
+    ) -> tuple[dict, bytes] | TickResult:
+        """Authenticate the frozen boundary and snapshot protected members."""
+
+        try:
+            record = self._store.read_pass_boundary(self._run_id)
+        except (OSError, UnicodeDecodeError, ValueError, RunStoreRefusal):
+            record = None
+        if not _valid_pass_boundary_record(record, self._run_id):
+            self._advance_transition(attempt, "closed")
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "rework requires a readable frozen pass-boundary manifest",
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt.name,
+            )
+
+        boundary_path = self._store.run_dir(self._run_id) / "pass_boundary.json"
+        try:
+            boundary_sha256 = _bounded_file_sha256(
+                boundary_path, self._policy.limits.max_run_store_bytes
+            )
+        except (OSError, ValueError):
+            self._advance_transition(attempt, "closed")
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "rework pass-boundary manifest is missing or over-bound",
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt.name,
+            )
+        boundary_events = [
+            event for event in self._events if event.get("kind") == "pass_boundary"
+        ]
+        if (
+            len(boundary_events) != 1
+            or boundary_events[0].get("evidence_sha256") != boundary_sha256
+            or boundary_events[0].get("evidence_members")
+            != len(record["evidence"])
+            or boundary_events[0].get("artifact_members")
+            != len(record["artifacts"])
+        ):
+            self._advance_transition(attempt, "closed")
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "rework pass-boundary manifest does not match its durable fact",
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt.name,
+            )
+
+        frozen: dict[str, bytes] = {}
+        frozen_total = 0
+        try:
+            for member in record["artifacts"]:
+                relative = member["path"]
+                if not rework_protected_artifact(relative):
+                    continue
+                data = _bounded_workspace_file(
+                    lease.root,
+                    relative,
+                    self._policy.limits.max_run_store_bytes,
+                )
+                if hashlib.sha256(data).hexdigest() != member["sha256"]:
+                    raise ValueError("protected member differs from frozen hash")
+                frozen_total += len(data)
+                if frozen_total > self._policy.limits.max_run_store_bytes:
+                    raise RunStoreRefusal(
+                        "accepted_snapshot_store_full",
+                        "protected accepted artifacts exceed the run-store bound",
+                    )
+                frozen[relative] = data
+            envelope = _rework_envelope(expected_rel)
+            snapshot = self._store.write_accepted_snapshot(
+                attempt,
+                frozen,
+                pass_boundary_sha256=boundary_sha256,
+                max_total_bytes=self._policy.limits.max_run_store_bytes,
+            )
+        except RunStoreRefusal as refused:
+            self._advance_transition(attempt, "closed")
+            reason = (
+                StopReason.RUN_STORE_FULL
+                if refused.code == "accepted_snapshot_store_full"
+                else StopReason.INVALID_STATE
+            )
+            return self._stop(
+                reason,
+                "rework accepted-artifact snapshot could not be persisted safely",
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt.name,
+            )
+        except (OSError, ValueError):
+            self._advance_transition(attempt, "closed")
+            return self._stop(
+                StopReason.INVALID_STATE,
+                "a protected accepted artifact is missing, unreadable, or stale",
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt.name,
+            )
+        return snapshot, envelope
+
+    def _rework_snapshot_violations(
+        self, workspace: Path, snapshot: dict | None
+    ) -> list[dict[str, str]]:
+        if snapshot is None:
+            return []
+        violations: list[dict[str, str]] = []
+        for member in snapshot.get("members", ()):
+            try:
+                data = _bounded_workspace_file(
+                    workspace,
+                    member["path"],
+                    self._policy.limits.max_run_store_bytes,
+                )
+                observed = hashlib.sha256(data).hexdigest()
+            except (KeyError, OSError, TypeError, ValueError):
+                observed = "unavailable"
+            if observed != member.get("sha256"):
+                violations.append(
+                    {
+                        "code": "accepted_artifact_changed",
+                        "path": str(member.get("path", "")),
+                        "expected_sha256": str(member.get("sha256", "")),
+                        "observed_sha256": observed,
+                        "snapshot": str(member.get("snapshot", "")),
+                    }
+                )
+        return violations
+
+    def _rework_path_stop(
+        self,
+        state: PlanningState | None,
+        slice_id: str,
+        attempt: Path,
+        violations: list[dict[str, str]],
+    ) -> TickResult:
+        if not violations:
+            violations = [
+                {
+                    "code": "accepted_artifact_changed",
+                    "path": "unavailable",
+                    "expected_sha256": "unavailable",
+                    "observed_sha256": "unavailable",
+                    "snapshot": "accepted_snapshot/inventory.json",
+                }
+            ]
+        self._journal(
+            "fence", attempt=attempt.name, violations=violations
+        )
+        if self._store.read_transition(attempt) != "closed":
+            self._advance_transition(attempt, "closed")
+        members = "\n".join(
+            "- {path}: expected SHA-256 {expected}; observed {observed}; "
+            "snapshot {snapshot}".format(
+                path=item["path"],
+                expected=item["expected_sha256"],
+                observed=item["observed_sha256"],
+                snapshot=item["snapshot"],
+            )
+            for item in violations
+        )
+        return self._stop(
+            StopReason.PATH_VIOLATION,
+            "rework turn changed a protected accepted artifact",
+            state=state,
+            slice_id=slice_id,
+            attempt_id=attempt.name,
+            decision=(
+                "Protected accepted-artifact changes require disclosed human "
+                "adjudication. The drive does not restore files automatically. "
+                "Compare the workspace with the byte-exact attempt snapshots, "
+                "decide whether restoration is authorized, and record that "
+                "decision before resuming. Before any authorized byte-exact "
+                "filing, follow the 'Governed filing protocol (stopped runs "
+                "only)' section of 09_ops/operators_manual.md, record the "
+                "intervention, and only then resume.\n" + members
+            ),
+        )
 
     def _build_request(
         self,
@@ -1930,6 +2280,7 @@ class Supervisor:
         expected_rel: tuple[str, ...],
         lease,
         seat: RoleSeat | None = None,
+        effort: str = "",
     ) -> AgentRunRequest:
         prompt_bytes = Path(prompt_path).read_bytes()
         # The request carries the selected role's exact configured seat
@@ -1955,7 +2306,7 @@ class Supervisor:
             base_revision=lease.base_revision,
             adapter=seat.adapter,
             model=seat.model,
-            effort=self._role_efforts.get(role.value, ""),
+            effort=effort,
             workspace_access=access
             if access in ("read_only", "workspace_write")
             else "read_only",
@@ -1963,6 +2314,28 @@ class Supervisor:
             max_seconds=max(1, int(self._watch_timeout)),
             max_cost_usd=remaining_cost,
         )
+
+    def _effort_for_dispatch(
+        self,
+        role: Role,
+        slice_id: str,
+        *,
+        repair: bool,
+        frontier_round: int = 1,
+    ) -> str:
+        """Select the fixed launch-time effort for this lifecycle round."""
+
+        default, corrective = self._role_efforts.get(role.value, ("", ""))
+        if role is Role.ARCHITECT:
+            return default
+        collected = self._counters.lifecycle_coder_collected_for(slice_id)
+        replay_round = (
+            collected + 1
+            if role is Role.CODER and not repair
+            else max(1, collected)
+        )
+        round_number = max(frontier_round, replay_round)
+        return corrective if round_number > 1 else default
 
     def _execute(self, request: AgentRunRequest, attempt: Path) -> AgentRunResult | None:
         executor = self._executors[request.role.value]
@@ -1973,7 +2346,7 @@ class Supervisor:
         except Exception:
             self._journal("attempt_abandoned", attempt=attempt.name,
                           cause="executor_error")
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return None
 
     def _authority_stop(
@@ -1990,7 +2363,7 @@ class Supervisor:
                 {"code": v.code, "path": v.path} for v in denied.violations
             ],
         )
-        self._store.advance_transition(attempt, "closed")
+        self._advance_transition(attempt, "closed")
         return self._stop(
             StopReason.PATH_VIOLATION,
             "pre-effect authority refusal",
@@ -2007,7 +2380,7 @@ class Supervisor:
             if log_path.is_file():
                 self._store.write_provider_events(attempt, log_path.read_bytes())
             self._store.write_result(attempt, result)
-        self._store.advance_transition(attempt, "collected")
+        self._advance_transition(attempt, "collected")
         if not self._has_collected_event(slice_id, attempt.name):
             self._journal(
                 "collected",
@@ -2066,7 +2439,7 @@ class Supervisor:
         return None
 
     def _verification_failed_result(self, attempt: Path) -> TickResult:
-        self._store.advance_transition(attempt, "closed")
+        self._advance_transition(attempt, "closed")
         return TickResult("acted", "verification_failed")
 
     def _ensure_verified_coder_attempt(self, slice_id: str) -> TickResult | None:
@@ -2098,7 +2471,7 @@ class Supervisor:
             )
             if violation is None:
                 if self._store.read_transition(latest) == "validated":
-                    self._store.advance_transition(latest, "closed")
+                    self._advance_transition(latest, "closed")
                 return None
             return self._stop(
                 StopReason.VERIFICATION_MISSING,
@@ -2126,8 +2499,8 @@ class Supervisor:
                 slice_id=slice_id,
                 attempt_id=latest.name,
             )
-        self._store.advance_transition(latest, "validated")
-        self._store.advance_transition(latest, "closed")
+        self._advance_transition(latest, "validated")
+        self._advance_transition(latest, "closed")
         return None
 
     def _is_coder_evidence_attempt(self, attempt: Path) -> bool:
@@ -2197,7 +2570,7 @@ class Supervisor:
             prior_attempt=prior_attempt.name,
             evidence_sha256=hashes,
         )
-        self._store.advance_transition(attempt, "collected")
+        self._advance_transition(attempt, "collected")
         return attempt
 
     def _check_adoption_candidate(
@@ -2324,11 +2697,66 @@ class Supervisor:
         for slice_id in self._store.list_slices(self._run_id):
             for attempt in self._store.list_attempts(self._run_id, slice_id):
                 transition = self._store.read_transition(attempt)
+                if transition != "closed":
+                    try:
+                        snapshot = self._store.read_accepted_snapshot(
+                            attempt,
+                            max_total_bytes=self._policy.limits.max_run_store_bytes,
+                        )
+                    except RunStoreRefusal:
+                        self._advance_transition(attempt, "closed")
+                        return self._stop(
+                            StopReason.INVALID_STATE,
+                            "rework accepted-artifact snapshot is unreadable",
+                            slice_id=slice_id,
+                            attempt_id=attempt.name,
+                        )
+                    if snapshot is not None:
+                        boundary_path = (
+                            self._store.run_dir(self._run_id)
+                            / "pass_boundary.json"
+                        )
+                        try:
+                            boundary_sha256 = _bounded_file_sha256(
+                                boundary_path,
+                                self._policy.limits.max_run_store_bytes,
+                            )
+                        except (OSError, ValueError):
+                            boundary_sha256 = ""
+                        if boundary_sha256 != snapshot.get(
+                            "pass_boundary_sha256"
+                        ):
+                            self._advance_transition(attempt, "closed")
+                            return self._stop(
+                                StopReason.INVALID_STATE,
+                                "rework snapshot no longer matches its frozen boundary",
+                                slice_id=slice_id,
+                                attempt_id=attempt.name,
+                            )
+                        request = self._store.read_request(attempt) or {}
+                        workspace_value = request.get("workspace")
+                        workspace = (
+                            Path(workspace_value)
+                            if isinstance(workspace_value, str)
+                            and workspace_value
+                            else self._workspace.lease(
+                                self._run_id,
+                                slice_id,
+                                self._policy.git.worktree_per_slice,
+                            ).root
+                        )
+                        violations = self._rework_snapshot_violations(
+                            workspace, snapshot
+                        )
+                        if violations:
+                            return self._rework_path_stop(
+                                None, slice_id, attempt, violations
+                            )
                 if transition == "planned":
                     self._journal(
                         "attempt_abandoned", attempt=attempt.name, cause="planned_at_crash"
                     )
-                    self._store.advance_transition(attempt, "closed")
+                    self._advance_transition(attempt, "closed")
                 elif transition in ("started", "externally_completed"):
                     stop = self._reconcile_started(attempt, transition)
                     if stop is not None:
@@ -2371,8 +2799,8 @@ class Supervisor:
                         cost_usd=result.get("cost_usd"),
                     )
                 if self._store.read_transition(attempt) != "closed":
-                    self._store.advance_transition(attempt, "validated")
-                    self._store.advance_transition(attempt, "closed")
+                    self._advance_transition(attempt, "validated")
+                    self._advance_transition(attempt, "closed")
 
     def _reconcile_collected_journal(self, attempt: Path) -> None:
         request = self._store.read_request(attempt) or {}
@@ -2396,8 +2824,8 @@ class Supervisor:
             for event in self._events
         )
         if completed_control:
-            self._store.advance_transition(attempt, "validated")
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "validated")
+            self._advance_transition(attempt, "closed")
 
     def _reconcile_pending_verb(self) -> TickResult | None:
         """Delegate crash recovery to the normal verb transaction authority."""
@@ -2473,7 +2901,7 @@ class Supervisor:
             self._journal(
                 "attempt_abandoned", attempt=attempt.name, cause="request_missing"
             )
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return None
         workspace = Path(str(request.get("workspace")))
         expected = [str(p) for p in request.get("expected_artifacts", [])]
@@ -2484,7 +2912,7 @@ class Supervisor:
             self._journal(
                 "attempt_abandoned", attempt=attempt.name, cause="no_external_artifacts"
             )
-            self._store.advance_transition(attempt, "closed")
+            self._advance_transition(attempt, "closed")
             return None
 
         prompt_path = Path(str(request.get("prompt_path")))
@@ -2520,7 +2948,7 @@ class Supervisor:
                     attempt_id=attempt.name,
                 )
         if transition == "started":
-            self._store.advance_transition(attempt, "externally_completed")
+            self._advance_transition(attempt, "externally_completed")
         if self._store.read_result(attempt) is None:
             synthesized = AgentRunResult(
                 status="completed",
@@ -2533,7 +2961,7 @@ class Supervisor:
                 cost_usd=None,
             )
             self._store.write_result(attempt, synthesized)
-        self._store.advance_transition(attempt, "collected")
+        self._advance_transition(attempt, "collected")
         if not self._has_collected_event(attempt.parent.name, attempt.name):
             self._journal(
                 "collected",
@@ -2573,8 +3001,8 @@ class Supervisor:
         verified = self._run_verification(attempt, lease, slice_id)
         if isinstance(verified, TickResult):
             return verified
-        self._store.advance_transition(attempt, "validated")
-        self._store.advance_transition(attempt, "closed")
+        self._advance_transition(attempt, "validated")
+        self._advance_transition(attempt, "closed")
         return TickResult("acted", "coder_attempt_completed")
 
     def _satisfied_coder_attempt(
@@ -2724,7 +3152,9 @@ class Supervisor:
         path = self._project_root / relative
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
-    def _prompt_with_memory(self, attempt: Path, prompt_path: Path) -> Path:
+    def _prompt_with_memory(
+        self, attempt: Path, prompt_path: Path, *, envelope: bytes = b""
+    ) -> Path:
         """Project optional context and fixed conduct into attempt evidence."""
 
         prompt = prompt_path.read_bytes()
@@ -2745,7 +3175,7 @@ class Supervisor:
         return self._store.write_attempt_prompt(
             attempt,
             "memory_prompt.md",
-            _SEAT_CONDUCT_BLOCK + prompt + context,
+            _SEAT_CONDUCT_BLOCK + prompt + envelope + context,
         )
 
     def _queue_memory_updates(self, slice_id: str) -> None:
@@ -2789,6 +3219,21 @@ class Supervisor:
         self._events.append(event)
         self._counters.apply(event)
 
+    def _advance_transition(self, attempt: Path, state: str) -> None:
+        """Advance one attempt step without ever requesting a regression."""
+
+        try:
+            target_index = TRANSITION_STATES.index(state)
+        except ValueError:
+            # Preserve the run store as the authority for unknown-state
+            # refusal instead of turning a caller bug into a generic error.
+            self._store.advance_transition(attempt, state)
+            return
+        current = self._store.read_transition(attempt)
+        if TRANSITION_STATES.index(current) >= target_index:
+            return
+        self._store.advance_transition(attempt, state)
+
     def _stop(
         self,
         reason: StopReason,
@@ -2809,6 +3254,38 @@ class Supervisor:
                 f"diagnostic_codes={codes}"
             )
         attempts_summary = self._attempts_summary(slice_id)
+        decision_required = decision or (
+            f"Resolve the '{reason.value}' stop condition ({detail})."
+        )
+        safe_options = (
+            "Inspect the run store journal and attempt records; adjust "
+            "policy limits or the driven project's artifacts; then resume "
+            "only when the governing prompt or owner authority permits it."
+        )
+        if reason is StopReason.LADDER_ROUND3:
+            attempts_summary += "\n\n" + self._ladder_round3_chain(
+                state, slice_id
+            )
+            decision_required = (
+                "Before any resume, the architect reassessment must classify "
+                "the blocking findings and record exactly one exit:\n"
+                "(a) product-plane code defects — exit to a corrective round; "
+                "round 4 still requires the existing human authorization;\n"
+                "(b) demands not traceable to the coding prompt's Task, "
+                "Non-Goals, Verification, or Definition Of Done — exit to "
+                "envelope-expansion change control, never another corrective "
+                "round; or\n"
+                "(c) evidence/documentation-plane issues — exit to a narrow "
+                "documentation round, a P3 disposition accompanying pass, "
+                "or a waiver/accepted-limitation record.\n"
+                "The classification and selected exit must be recorded before "
+                "any resume."
+            )
+            safe_options = (
+                "Use only the recorded three-exit reassessment fork. The "
+                "runner does not parse reports, compute invariant recurrence, "
+                "or authorize a fourth round."
+            )
         escalation = write_escalation(
             self._store,
             self._run_id,
@@ -2817,28 +3294,105 @@ class Supervisor:
             attempt_id=attempt_id,
             planning_snapshot=snapshot,
             attempts_summary=attempts_summary,
-            decision_required=decision
-            or f"Resolve the '{reason.value}' stop condition ({detail}).",
-            safe_options=(
-                "Inspect the run store journal and attempt records; adjust "
-                "policy limits or the driven project's artifacts; then resume "
-                "only when the governing prompt or owner authority permits it."
-            ),
+            decision_required=decision_required,
+            safe_options=safe_options,
             actions_not_taken=(
                 "No commit, artifact acceptance, governance edit, redispatch, "
                 "or retry was performed after the stop condition fired."
             ),
             resume_command=f"python -m frutlups_drive resume . {self._run_id}",
         )
-        self._journal(
-            "stop",
-            reason=reason.value,
-            detail=detail,
-            escalation=escalation.name,
-            slice=slice_id,
-            attempt=attempt_id,
-        )
+        try:
+            self._journal(
+                "stop",
+                reason=reason.value,
+                detail=detail,
+                escalation=escalation.name,
+                slice=slice_id,
+                attempt=attempt_id,
+            )
+        except RunStoreRefusal as refusal:
+            # The tick boundary must not recursively retry the very journal
+            # write that proves the governed stop. One honest attempt is the
+            # limit when the append-only store itself is unavailable.
+            setattr(refusal, _STOP_JOURNAL_ATTEMPTED, True)
+            raise
         return TickResult("stopped", detail, reason, escalation)
+
+    def _ladder_round3_chain(
+        self, state: PlanningState | None, slice_id: str
+    ) -> str:
+        """Render the active lifecycle from journal and planning state only."""
+
+        start = 0
+        for index, event in enumerate(self._events):
+            slices = event.get("slices")
+            if (
+                event.get("kind") == "verb"
+                and event.get("verb") == "declare-rework"
+                and isinstance(slices, list)
+                and slice_id in slices
+            ):
+                start = index + 1
+
+        rounds: dict[int, list[str]] = {}
+        collected_coder_rounds = 0
+        for event in self._events[start:]:
+            if event.get("slice") != slice_id:
+                continue
+            if event.get("kind") == "collected" and event.get("role") == "coder":
+                collected_coder_rounds += 1
+                continue
+            if event.get("kind") != "dispatch":
+                continue
+            role = str(event.get("role", "unknown"))
+            repair = bool(event.get("repair"))
+            active_round = (
+                collected_coder_rounds + 1
+                if role == "coder" and not repair
+                else max(1, collected_coder_rounds)
+            )
+            identity = (
+                f"{event.get('adapter', 'unknown')}/"
+                f"{event.get('model', 'unknown')} "
+                f"effort={event.get('effort', 'unavailable')}"
+            )
+            prompt = event.get("prompt_source", "not journaled")
+            rounds.setdefault(active_round, []).append(
+                f"  - {role} dispatch {event.get('attempt', 'unknown')}: "
+                f"{identity}; repair={str(repair).lower()}; prompt={prompt}"
+            )
+
+        artifact_line = "unavailable"
+        verdict_line = "verdict unavailable"
+        if state is not None:
+            artifacts = state.artifacts
+            artifact_line = "; ".join(
+                f"{name}={getattr(artifacts, name) or 'null'}"
+                for name in (
+                    "coding_prompt",
+                    "self_report",
+                    "review_prompt",
+                    "review_report",
+                    "verdict_record",
+                )
+            )
+            if state.verdict is not None:
+                verdict_line = (
+                    f"verdict.value={state.verdict.value}; "
+                    f"verdict.next_move={state.verdict.next_move}; "
+                    f"verdict.report={state.verdict.report}"
+                )
+
+        lines = ["### Active Lifecycle Chain"]
+        if not rounds:
+            lines.append("- no active-lifecycle dispatches journaled")
+        for number, dispatches in sorted(rounds.items()):
+            lines.append(f"- round {number}")
+            lines.extend(dispatches)
+            lines.append(f"  - planning-state artifact paths: {artifact_line}")
+        lines.append(f"- planning-state verdict tokens: {verdict_line}")
+        return "\n".join(lines)
 
     def _attempts_summary(self, slice_id: str) -> str:
         if not slice_id:
@@ -2862,6 +3416,48 @@ def _bounded_file_sha256(path: Path, cap: int) -> str:
     if len(data) > cap:
         raise ValueError("file exceeds the run-store evidence bound")
     return hashlib.sha256(data).hexdigest()
+
+
+def _bounded_workspace_file(root: Path, relative: str, cap: int) -> bytes:
+    if not _canonical_relative(relative):
+        raise ValueError("workspace artifact path is not canonical")
+    target = Path(root) / relative
+    if target.is_symlink() or _is_junction(target):
+        raise ValueError("workspace artifact is link-like")
+    try:
+        resolved_root = Path(root).resolve(strict=True)
+        resolved = target.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+    except (OSError, ValueError):
+        raise ValueError("workspace artifact is outside the workspace") from None
+    if not resolved.is_file():
+        raise ValueError("workspace artifact is not an ordinary file")
+    with open(resolved, "rb") as stream:
+        data = stream.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("workspace artifact exceeds the run-store evidence bound")
+    return data
+
+
+def _rework_envelope(expected_rel: tuple[str, ...]) -> bytes:
+    if not expected_rel or any(not _canonical_relative(path) for path in expected_rel):
+        raise ValueError("rework declared outputs are missing or non-canonical")
+    outputs = b"".join(
+        b"- `" + path.encode("utf-8") + b"`\n" for path in expected_rel
+    )
+    envelope = (
+        b"\n\n## Rework Turn Write Authority\n\n"
+        b"The only report or evidence outputs authorized for this turn are:\n"
+        + outputs
+        + b"Legitimate product and code changes required by the governed prompt "
+        b"remain authorized. Never create, modify, delete, or rename an accepted "
+        b"artifact, including any accepted coding prompt, review prompt, "
+        b"self-report, review report, or verdict record. A protected accepted "
+        b"artifact write stops the run.\n"
+    )
+    if len(envelope) > _MAX_REWORK_ENVELOPE_BYTES:
+        raise ValueError("rework dispatch envelope exceeds its byte bound")
+    return envelope
 
 
 def _sha256_text(value: object) -> bool:

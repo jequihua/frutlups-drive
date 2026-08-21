@@ -63,6 +63,7 @@ class BudgetCounters:
         self.run_started_at: float | None = None
         self.coder_dispatches: dict[str, int] = {}
         self.coder_collected: dict[str, int] = {}
+        self.lifecycle_coder_collected: dict[str, int] = {}
         self.repair_dispatches: dict[str, int] = {}
         self.reconciliation_dispatches: dict[str, int] = {}
         self.total_cost_usd = 0.0
@@ -98,6 +99,12 @@ class BudgetCounters:
                 self.reconciliation_dispatches[slice_id] = (
                     self.reconciliation_dispatches.get(slice_id, 0) + 1
                 )
+        elif kind == "verb":
+            slices = event.get("slices")
+            if event.get("verb") == "declare-rework" and isinstance(slices, list):
+                for slice_id in slices:
+                    if isinstance(slice_id, str):
+                        self.lifecycle_coder_collected.pop(slice_id, None)
         elif kind == "collected":
             cost = event.get("cost_usd")
             if cost is not None:
@@ -112,6 +119,9 @@ class BudgetCounters:
                 slice_id = str(event.get("slice"))
                 self.coder_collected[slice_id] = (
                     self.coder_collected.get(slice_id, 0) + 1
+                )
+                self.lifecycle_coder_collected[slice_id] = (
+                    self.lifecycle_coder_collected.get(slice_id, 0) + 1
                 )
             if event.get("status") == "completed":
                 self.consecutive_provider_failures = 0
@@ -143,6 +153,9 @@ class BudgetCounters:
 
     def coder_collected_for(self, slice_id: str) -> int:
         return self.coder_collected.get(slice_id, 0)
+
+    def lifecycle_coder_collected_for(self, slice_id: str) -> int:
+        return self.lifecycle_coder_collected.get(slice_id, 0)
 
     def repairs_for(self, slice_id: str) -> int:
         return self.repair_dispatches.get(slice_id, 0)

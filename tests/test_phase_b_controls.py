@@ -45,6 +45,7 @@ PHASE_B_POLICY = (
     "[autonomy]\npass_boundary = \"two_clean\"\n"
     "auto_continue_past_frontier_recorded = true\n"
 )
+NO_LEDGER_POLICY = 'index_mode = "no-ledger"\n' + PHASE_B_POLICY
 
 
 class PhaseBLoopTests(unittest.TestCase):
@@ -169,9 +170,47 @@ class PhaseBLoopTests(unittest.TestCase):
         self.assertIn(oracle_event["oracle_sha256"], prompt)
         self.assertIn("confirm or refute", prompt)
         self.assertIn("primary sources", prompt)
+        self.assertIn("Declared reviews INDEX mode: human-ledger", prompt)
+        self.assertIn("annotation is a pointer", prompt)
+        self.assertIn("never a pre-judgment", prompt)
         self.assertIn("attack beyond the bundle", prompt)
         self.assertIn("spot-check", prompt)
         self.assertIn("Produce exactly holistic_review.json", prompt)
+
+    def test_no_ledger_holistic_prompt_teaches_tripwire_and_authority(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state()],
+            reviewer=[holistic([])],
+            policy_body=NO_LEDGER_POLICY,
+        )
+        scenario.supervisor.tick()
+        bundle = scenario.store.read_pass_oracle("run_001")
+        self.assertEqual(bundle["index_mode"], "no-ledger")
+        scenario.supervisor.tick()
+        attempt = scenario.store.list_attempts(
+            "run_001", "holistic_pass_001"
+        )[0]
+        prompt = (attempt / "holistic_prompt.md").read_text(encoding="utf-8")
+        self.assertIn("Declared reviews INDEX mode: no-ledger", prompt)
+        self.assertIn("unindexed-artifact complaints are absent by contract", prompt)
+        self.assertIn("ledger_row_in_no_ledger_project", prompt)
+        self.assertIn("high-priority", prompt)
+        self.assertIn("holistic_review.json remains the sole worklist authority", prompt)
+
+    def test_no_ledger_still_requires_a_readable_index(self):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state()],
+            reviewer=[holistic([])],
+            policy_body=NO_LEDGER_POLICY,
+        )
+        (scenario.project / "05_governance/reviews/INDEX.md").unlink()
+        result = scenario.supervisor.tick()
+        self.assertEqual(result.stop_reason, StopReason.INVALID_STATE)
+        self.assertEqual(
+            scenario.store.list_attempts("run_001", "holistic_pass_001"), ()
+        )
 
     def test_missing_index_stops_before_holistic_dispatch(self):
         scenario = Scenario(

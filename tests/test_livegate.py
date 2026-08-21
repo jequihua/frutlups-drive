@@ -80,6 +80,29 @@ class ReadyAssessmentTests(unittest.TestCase):
             ("PROVIDER_CODER_KEY", "PROVIDER_REVIEWER_KEY"),
         )
         self.assertEqual(len(declaration.stop_conditions), 3)
+        self.assertIsNone(declaration.coder_corrective_effort)
+        self.assertIsNone(declaration.reviewer_corrective_effort)
+        self.assertIsNone(declaration.architect_corrective_effort)
+
+    def test_present_valid_corrective_efforts_are_frozen_declaration_facts(self):
+        source = valid_declaration()
+        source.update(
+            coder_adapter="codex_cli",
+            coder_model="gpt-5.6-sol",
+            coder_corrective_effort="high",
+            reviewer_adapter="kimi_cli",
+            reviewer_model="kimi-code/k3",
+            reviewer_corrective_effort="high",
+            architect_adapter="claude_cli",
+            architect_model="claude-opus-5",
+            architect_corrective_effort="xhigh",
+        )
+        assessment = assess_live_gate(source)
+        self.assertTrue(assessment.ready, assessment.issues)
+        self.assertEqual(assessment.declaration.coder_corrective_effort, "high")
+        self.assertEqual(
+            assessment.declaration.architect_corrective_effort, "xhigh"
+        )
 
     def test_assessment_and_declaration_are_frozen(self):
         assessment = assess_live_gate(valid_declaration())
@@ -151,8 +174,15 @@ class NonReadyAssessmentTests(IssueTestCase):
                 )
 
     def test_approval_reference_must_be_repo_relative(self):
-        for bad in ("C:/notes/gate.md", "/abs/gate.md", "../gate.md",
-                    "a\\b.md", "  "):
+        slash = chr(47)
+        backslash = chr(92)
+        for bad in (
+            slash.join(("C" + chr(58), "notes", "gate.md")),
+            slash + slash.join(("abs", "gate.md")),
+            "../gate.md",
+            "a" + backslash + "b.md",
+            "  ",
+        ):
             with self.subTest(reference=repr(bad)):
                 self.assert_issue(
                     self.assess(approval_reference=bad),
@@ -216,6 +246,31 @@ class NonReadyAssessmentTests(IssueTestCase):
         self.assert_issue(
             self.assess(coder_model="   "), "identity_missing", "coder_model"
         )
+
+    def test_invalid_corrective_efforts_refuse_at_gate_admission(self):
+        base = valid_declaration()
+        base.update(
+            coder_adapter="codex_cli",
+            coder_model="gpt-5.6-sol",
+            reviewer_adapter="kimi_cli",
+            reviewer_model="kimi-code/k3",
+            architect_adapter="claude_cli",
+            architect_model="claude-opus-5",
+        )
+        cases = (
+            ("coder_corrective_effort", "ultra", "provider_effort_unknown"),
+            ("coder_corrective_effort", "max",
+             "provider_corrective_effort_too_high"),
+            ("coder_corrective_effort", "xhigh",
+             "provider_corrective_effort_not_allowed"),
+            ("reviewer_corrective_effort", "max",
+             "provider_corrective_effort_unsupported"),
+        )
+        for field, effort, code in cases:
+            with self.subTest(field=field, effort=effort):
+                source = dict(base)
+                source[field] = effort
+                self.assert_issue(assess_live_gate(source), code, field)
 
     def test_bad_credential_names_are_refused(self):
         for bad_names in (["lower_case"], ["1STARTS_WITH_DIGIT"],

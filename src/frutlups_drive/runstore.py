@@ -24,6 +24,7 @@ accepts artifacts. Invariants:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -31,7 +32,7 @@ import shutil
 import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from frutlups_drive.contracts import AgentRunRequest, AgentRunResult
 
@@ -81,8 +82,12 @@ _ATTEMPT_PROMPT_NAMES = (
 _VERIFICATION_FILE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _ESCALATION_RUN_ID = re.compile(r'^run_id = "(?P<run_id>[^"]+)"$', re.MULTILINE)
 _PASS_REVIEW_NAME = re.compile(r"pass_\d{3,}_holistic\.json")
+_ACCEPTED_SNAPSHOT_NAME = re.compile(r"accepted_snapshot/\d{6}\.bin")
 RESOLUTION_MARKER_SUFFIX = ".resolved"
 MAX_PASS_ORACLE_BYTES = 1_048_576
+MAX_ACCEPTED_SNAPSHOT_BYTES = 64 * 1024 * 1024
+MAX_ACCEPTED_SNAPSHOT_INVENTORY_BYTES = 8 * 1024 * 1024
+MAX_ACCEPTED_SNAPSHOT_MEMBERS = 20_000
 
 
 @dataclass(frozen=True)
@@ -427,6 +432,210 @@ class RunStore:
         path = attempt / filename
         _write_once(path, data, "attempt_prompt_conflict")
         return path
+
+    def write_accepted_snapshot(
+        self,
+        attempt_dir: Path,
+        members: Mapping[str, bytes],
+        *,
+        pass_boundary_sha256: str,
+        max_total_bytes: int,
+    ) -> dict:
+        """Freeze byte-exact accepted artifacts as bounded attempt evidence."""
+
+        attempt = self._owned_attempt_dir(attempt_dir)
+        if (
+            not isinstance(members, Mapping)
+            or not _sha256_text(pass_boundary_sha256)
+            or type(max_total_bytes) is not int
+            or max_total_bytes <= 0
+        ):
+            raise RunStoreRefusal(
+                "accepted_snapshot_invalid",
+                "accepted snapshot inputs are malformed",
+            )
+        checked: list[tuple[str, bytes]] = []
+        for path, data in members.items():
+            if not _canonical_relative(path) or type(data) is not bytes:
+                raise RunStoreRefusal(
+                    "accepted_snapshot_invalid",
+                    "accepted snapshot members must be canonical paths and bytes",
+                )
+            checked.append((path, data))
+        checked.sort(key=lambda item: item[0])
+        if (
+            len(checked) > MAX_ACCEPTED_SNAPSHOT_MEMBERS
+            or len({path for path, _ in checked}) != len(checked)
+        ):
+            raise RunStoreRefusal(
+                "accepted_snapshot_invalid",
+                "accepted snapshot members exceed their bound or are not unique",
+            )
+
+        inventory_members = []
+        for number, (path, data) in enumerate(checked, start=1):
+            inventory_members.append(
+                {
+                    "path": path,
+                    "sha256": hashlib.sha256(data).hexdigest(),
+                    "snapshot": f"accepted_snapshot/{number:06d}.bin",
+                }
+            )
+        payload = {
+            "contract_version": 1,
+            "pass_boundary_sha256": pass_boundary_sha256,
+            "members": inventory_members,
+        }
+        inventory_data = _serialized(
+            "accepted_snapshot_not_serializable", payload
+        )
+        directory = attempt / "accepted_snapshot"
+        if directory.exists() and (
+            directory.is_symlink()
+            or _is_junction(directory)
+            or not directory.is_dir()
+        ):
+            raise RunStoreRefusal(
+                "accepted_snapshot_invalid",
+                "accepted snapshot directory is not an ordinary directory",
+            )
+        publications = [
+            (attempt / str(item["snapshot"]), data)
+            for item, (_, data) in zip(inventory_members, checked, strict=True)
+        ] + [(directory / "inventory.json", inventory_data)]
+        additional_bytes = 0
+        for target, data in publications:
+            if target.is_symlink() or _is_junction(target):
+                raise RunStoreRefusal(
+                    "accepted_snapshot_invalid",
+                    "accepted snapshot publication target is link-like",
+                )
+            existing = _read_if_exists(target)
+            if existing is None:
+                additional_bytes += len(data)
+            elif existing != data:
+                raise _conflict_refusal(
+                    "accepted_snapshot_conflict", target.name
+                )
+        if (
+            len(inventory_data)
+            > min(max_total_bytes, MAX_ACCEPTED_SNAPSHOT_INVENTORY_BYTES)
+            or _tree_size(self.root / "runs") + additional_bytes
+            > max_total_bytes
+        ):
+            raise RunStoreRefusal(
+                "accepted_snapshot_store_full",
+                "accepted snapshot would exceed the run-store byte bound",
+            )
+
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            if directory.is_symlink() or _is_junction(directory) or not directory.is_dir():
+                raise RunStoreRefusal(
+                    "accepted_snapshot_invalid",
+                    "accepted snapshot directory is not an ordinary directory",
+                ) from None
+        for item, (_, data) in zip(inventory_members, checked, strict=True):
+            target = attempt / str(item["snapshot"])
+            _write_once(target, data, "accepted_snapshot_conflict")
+        _write_once(
+            directory / "inventory.json",
+            inventory_data,
+            "accepted_snapshot_conflict",
+        )
+        return payload
+
+    def read_accepted_snapshot(
+        self,
+        attempt_dir: Path,
+        *,
+        max_total_bytes: int = MAX_ACCEPTED_SNAPSHOT_BYTES,
+    ) -> dict | None:
+        """Read and authenticate a byte-exact accepted-artifact snapshot."""
+
+        attempt = self._owned_attempt_dir(attempt_dir)
+        directory = attempt / "accepted_snapshot"
+        inventory_path = directory / "inventory.json"
+        if not inventory_path.is_file():
+            return None
+        refusal = RunStoreRefusal(
+            "accepted_snapshot_invalid",
+            "accepted snapshot inventory or member bytes are malformed",
+        )
+        try:
+            if type(max_total_bytes) is not int or max_total_bytes <= 0:
+                raise refusal
+            if (
+                directory.is_symlink()
+                or _is_junction(directory)
+                or inventory_path.is_symlink()
+                or _is_junction(inventory_path)
+            ):
+                raise refusal
+            with open(inventory_path, "rb") as stream:
+                inventory_data = stream.read(
+                    min(
+                        max_total_bytes,
+                        MAX_ACCEPTED_SNAPSHOT_INVENTORY_BYTES,
+                    )
+                    + 1
+                )
+            if len(inventory_data) > min(
+                max_total_bytes, MAX_ACCEPTED_SNAPSHOT_INVENTORY_BYTES
+            ):
+                raise refusal
+            payload = json.loads(
+                inventory_data.decode("utf-8"),
+                parse_constant=_reject_constant,
+            )
+            if (
+                not isinstance(payload, dict)
+                or set(payload)
+                != {"contract_version", "pass_boundary_sha256", "members"}
+                or payload.get("contract_version") != 1
+                or not _sha256_text(payload.get("pass_boundary_sha256"))
+                or not isinstance(payload.get("members"), list)
+                or len(payload["members"]) > MAX_ACCEPTED_SNAPSHOT_MEMBERS
+            ):
+                raise refusal
+            seen_paths: set[str] = set()
+            seen_snapshots: set[str] = set()
+            snapshot_bytes = 0
+            for member in payload["members"]:
+                if (
+                    not isinstance(member, dict)
+                    or set(member) != {"path", "sha256", "snapshot"}
+                    or not _canonical_relative(member.get("path"))
+                    or not _sha256_text(member.get("sha256"))
+                    or not isinstance(member.get("snapshot"), str)
+                    or not _ACCEPTED_SNAPSHOT_NAME.fullmatch(member["snapshot"])
+                    or member["path"] in seen_paths
+                    or member["snapshot"] in seen_snapshots
+                ):
+                    raise refusal
+                target = attempt / member["snapshot"]
+                if (
+                    target.is_symlink()
+                    or _is_junction(target)
+                    or not target.is_file()
+                ):
+                    raise refusal
+                with open(target, "rb") as stream:
+                    data = stream.read(max_total_bytes - snapshot_bytes + 1)
+                snapshot_bytes += len(data)
+                if (
+                    snapshot_bytes > max_total_bytes
+                    or hashlib.sha256(data).hexdigest() != member["sha256"]
+                ):
+                    raise refusal
+                seen_paths.add(member["path"])
+                seen_snapshots.add(member["snapshot"])
+            return payload
+        except RunStoreRefusal:
+            raise
+        except (OSError, UnicodeDecodeError, ValueError, TypeError):
+            raise refusal from None
 
     def write_diff_manifest(
         self, attempt_dir: Path, payload: Mapping[str, object]
@@ -854,6 +1063,25 @@ def _checked_identifier(field: str, value: str) -> str:
             "device basename)",
         )
     return value
+
+
+def _sha256_text(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
+
+
+def _canonical_relative(value: object) -> bool:
+    if not isinstance(value, str) or not value or chr(92) in value:
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in ("", ".", "..") for part in path.parts)
+    )
 
 
 def _reject_constant(token: str) -> None:

@@ -34,6 +34,10 @@ from pathlib import Path
 
 from frutlups_drive.planstate import _is_valid_artifact_reference
 from frutlups_drive.policy import _ADAPTER_VALUES, _secret_shaped
+from frutlups_drive.dispatch.provider_cli import (
+    ProviderBindingError,
+    catalog_effort_schedule,
+)
 
 _LOCAL_ADAPTERS = frozenset({"manual", "mock"})
 EXTERNAL_ADAPTERS = tuple(
@@ -67,6 +71,11 @@ _STRING_FIELDS = (
     "rollback_statement",
     "kill_switch_statement",
 )
+_OPTIONAL_STRING_FIELDS = (
+    "coder_corrective_effort",
+    "reviewer_corrective_effort",
+    "architect_corrective_effort",
+)
 _NUMERIC_FIELDS = (
     "max_total_cost_usd",
     "max_call_cost_usd",
@@ -88,6 +97,10 @@ _FIELD_VOCABULARY = (
     "rollback_statement",
     "kill_switch_statement",
     "stop_conditions",
+    *_OPTIONAL_STRING_FIELDS,
+)
+_REQUIRED_FIELDS = tuple(
+    field for field in _FIELD_VOCABULARY if field not in _OPTIONAL_STRING_FIELDS
 )
 
 
@@ -114,6 +127,9 @@ class LiveGateDeclaration:
     rollback_statement: str
     kill_switch_statement: str
     stop_conditions: tuple[tuple[str, str], ...]
+    coder_corrective_effort: str | None = None
+    reviewer_corrective_effort: str | None = None
+    architect_corrective_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -233,13 +249,16 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
             issues.append(LiveGateIssue("unknown_field", key))
 
     values: dict[str, object] = {}
-    for field in _FIELD_VOCABULARY:
+    for field in _REQUIRED_FIELDS:
         if field not in source:
             issues.append(LiveGateIssue("field_missing", field))
         else:
             values[field] = source[field]
+    for field in _OPTIONAL_STRING_FIELDS:
+        if field in source:
+            values[field] = source[field]
 
-    for field in _STRING_FIELDS:
+    for field in (*_STRING_FIELDS, *_OPTIONAL_STRING_FIELDS):
         if field not in values:
             continue
         value = values[field]
@@ -289,6 +308,19 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
         model = values.get(model_field)
         if isinstance(model, str) and not model.strip():
             issues.append(LiveGateIssue("identity_missing", model_field))
+        corrective_field = f"{prefix}_corrective_effort"
+        corrective = values.get(corrective_field)
+        if (
+            isinstance(adapter, str)
+            and isinstance(model, str)
+            and isinstance(corrective, str)
+            and adapter in EXTERNAL_ADAPTERS
+            and model.strip()
+        ):
+            try:
+                catalog_effort_schedule(adapter, model, corrective)
+            except ProviderBindingError as refusal:
+                issues.append(LiveGateIssue(refusal.code, corrective_field))
 
     coder_seat = (values.get("coder_adapter"), values.get("coder_model"))
     reviewer_seat = (
@@ -418,6 +450,9 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
         rollback_statement=str(values["rollback_statement"]),
         kill_switch_statement=str(values["kill_switch_statement"]),
         stop_conditions=stop_pairs,
+        coder_corrective_effort=values.get("coder_corrective_effort"),
+        reviewer_corrective_effort=values.get("reviewer_corrective_effort"),
+        architect_corrective_effort=values.get("architect_corrective_effort"),
     )
     return LiveGateAssessment(True, (), declaration)
 

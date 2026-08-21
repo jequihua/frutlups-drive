@@ -4,7 +4,7 @@ Exit codes are frozen: 0 clean boundary/success, 1 internal error, 2 refusal
 before action, 10 stopped with an escalation artifact. ``plan`` and ``report``
 are read-only; ``report`` derives only from an existing run store, while each
 mutating verb requires the project-local policy. Local mock runs use the
-``.frutlups_drive_mock/script.json``. External execution is limited to the
+project-local mock-script convention. External execution is limited to the
 two M003-S03 CLI seats and is admitted only through the committed live gate
 and an ignored explicit launch binding.
 """
@@ -31,7 +31,7 @@ from frutlups_drive.dispatch.provider_cli import (
     ProviderRuntimeBindings,
     build_provider_runtime,
     load_provider_binding,
-    provider_efforts,
+    provider_effort_schedules,
 )
 from frutlups_drive.frutlupscli import (
     PENDING_VERB_FILENAME,
@@ -384,8 +384,15 @@ def _run(project: Path, boundary: str) -> int:
     manifest["shadow_reviewer_adapter"] = shadow.adapter
     manifest["shadow_reviewer_model"] = shadow.model
     if authority.providers is not None:
-        for role_name, effort in provider_efforts().items():
-            manifest[f"{role_name}_effort"] = effort
+        declaration = authority.live_gate.assessment.declaration
+        if declaration is None:
+            raise CliRefusal(
+                "live_authority_missing",
+                "the admitted live gate has no declaration",
+            )
+        for role_name, schedule in provider_effort_schedules(declaration).items():
+            manifest[f"{role_name}_effort"] = schedule[0]
+            manifest[f"{role_name}_corrective_effort"] = schedule[1]
         manifest.update(authority.manifest_facts())
     if launch_identity is not None:
         manifest.update(launch_identity.manifest_facts())
@@ -733,15 +740,20 @@ def _finish(result: TickResult) -> int:
     return int(ExitCode.REFUSED)
 
 
-def _policy_external_seats(policy) -> dict[str, tuple[str, str]]:
+def _policy_external_seats(policy) -> dict[str, tuple[str, str, str | None]]:
     seats = {}
     for role in (Role.ARCHITECT, Role.CODER, Role.REVIEWER):
         seat = policy_seat(policy, role)
         if seat.adapter in EXTERNAL_ADAPTERS:
-            seats[role.value] = (seat.adapter, seat.model)
+            section = getattr(policy, role.value)
+            seats[role.value] = (
+                seat.adapter,
+                seat.model,
+                section.corrective_effort,
+            )
     shadow = shadow_policy_seat(policy)
     if policy.shadow_reviewer.enabled and shadow.adapter in EXTERNAL_ADAPTERS:
-        seats["shadow_reviewer"] = (shadow.adapter, shadow.model)
+        seats["shadow_reviewer"] = (shadow.adapter, shadow.model, None)
     return seats
 
 
@@ -768,15 +780,25 @@ def _authorized_gate(policy) -> LoadedLiveGate:
         "architect": (
             declaration.architect_adapter,
             declaration.architect_model,
+            declaration.architect_corrective_effort,
         ),
-        "coder": (declaration.coder_adapter, declaration.coder_model),
-        "reviewer": (declaration.reviewer_adapter, declaration.reviewer_model),
+        "coder": (
+            declaration.coder_adapter,
+            declaration.coder_model,
+            declaration.coder_corrective_effort,
+        ),
+        "reviewer": (
+            declaration.reviewer_adapter,
+            declaration.reviewer_model,
+            declaration.reviewer_corrective_effort,
+        ),
     }
     if _policy_external_seats(policy) != gate_seats:
         raise CliRefusal(
             "live_authority_missing",
-            "the committed gate seats do not exactly equal the policy's "
-            "external seats; nothing was created, spawned, or spent",
+            "the committed gate seats and corrective efforts do not exactly "
+            "equal the policy's external declarations; nothing was created, "
+            "spawned, or spent",
         )
     return loaded
 
@@ -1316,7 +1338,11 @@ def _build_supervisor(
         watch_timeout_seconds=(
             declaration.call_timeout_seconds if declaration is not None else 300.0
         ),
-        role_efforts=provider_efforts() if authority.providers is not None else {},
+        role_efforts=(
+            provider_effort_schedules(declaration)
+            if authority.providers is not None and declaration is not None
+            else {}
+        ),
         max_call_cost_usd=(
             declaration.max_call_cost_usd if declaration is not None else None
         ),

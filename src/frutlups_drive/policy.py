@@ -21,8 +21,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 SCHEMA_VERSION = "frutlups_drive_policy_v1"
+INDEX_MODES = ("human-ledger", "no-ledger")
 
 _ADAPTER_VALUES = ("manual", "mock", "api_call", "claude_cli", "codex_cli", "kimi_cli")
+_LOCAL_ADAPTERS = frozenset({"manual", "mock"})
 _ACCESS_VALUES = ("read_only", "workspace_write")
 _STOP_AT_VALUES = (
     "slice_complete",
@@ -73,6 +75,7 @@ class ArchitectPolicy:
     adapter: str
     model: str
     workspace_access: str
+    corrective_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +85,7 @@ class CoderPolicy:
     workspace_access: str
     resume_within_slice: bool
     resume_across_slices: bool
+    corrective_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,7 @@ class ReviewerPolicy:
     model: str
     workspace_access: str
     fresh_session_per_invocation: bool
+    corrective_effort: str | None = None
 
 
 @dataclass(frozen=True)
@@ -170,6 +175,7 @@ class FrutlupsToolPolicy:
 @dataclass(frozen=True)
 class ExecutionPolicy:
     schema_version: str
+    index_mode: str
     target: TargetPolicy
     architect: ArchitectPolicy
     coder: CoderPolicy
@@ -198,11 +204,15 @@ class PolicyLoadResult:
 
 
 # Field spec: (kind, default, allowed). Kinds: "enum" (closed vocabulary),
+# "optional_enum" (closed vocabulary whose absent default is not journaled),
 # "fixed" (single-value fixed policy boundary), "fixed_false" (bool pinned to
 # false), "str", "bool", "count" (int >= 0), "positive_count", "level"
 # (int 1..4), "money" (finite number >= 0), bounded positive seconds, and a
 # bounded non-decreasing seconds schedule.
 _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
+    (): {
+        "index_mode": ("optional_enum", "human-ledger", INDEX_MODES),
+    },
     ("target",): {
         "stop_at": ("enum", "milestone_complete", _STOP_AT_VALUES),
         "max_slices": ("count", 25, ()),
@@ -212,6 +222,7 @@ _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
         "adapter": ("enum", "manual", _ADAPTER_VALUES),
         "model": ("str", "", ()),
         "workspace_access": ("enum", "read_only", _ACCESS_VALUES),
+        "corrective_effort": ("optional_effort", None, ()),
     },
     ("roles", "coder"): {
         "adapter": ("enum", "manual", _ADAPTER_VALUES),
@@ -219,12 +230,14 @@ _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
         "workspace_access": ("enum", "workspace_write", _ACCESS_VALUES),
         "resume_within_slice": ("bool", True, ()),
         "resume_across_slices": ("bool", False, ()),
+        "corrective_effort": ("optional_effort", None, ()),
     },
     ("roles", "reviewer"): {
         "adapter": ("enum", "manual", _ADAPTER_VALUES),
         "model": ("str", "", ()),
         "workspace_access": ("enum", "read_only", _ACCESS_VALUES),
         "fresh_session_per_invocation": ("bool", True, ()),
+        "corrective_effort": ("optional_effort", None, ()),
     },
     ("roles", "shadow_reviewer"): {
         "enabled": ("bool", False, ()),
@@ -352,15 +365,42 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             dotted = ".".join((*section_path, key))
             if key not in table:
                 values[dotted] = default
-                defaulted.append(dotted)
+                if kind not in ("optional_effort", "optional_enum"):
+                    defaulted.append(dotted)
             else:
                 values[dotted] = _validate_field(dotted, kind, table[key], allowed)
 
     warnings: list[PolicyWarning] = []
     _collect_unknown_keys(document, (), _known_tree(), warnings)
 
+    # Imported only at load time: provider_cli's transport imports reach the
+    # budget module, which imports this policy module for type contracts.
+    # Delaying this pure catalog dependency avoids a module-import cycle while
+    # keeping the committed runtime catalog authoritative in provider_cli.
+    from frutlups_drive.dispatch.provider_cli import (
+        ProviderBindingError,
+        catalog_effort_schedule,
+    )
+
+    for role in ("architect", "coder", "reviewer"):
+        corrective = values[f"roles.{role}.corrective_effort"]
+        if corrective is None:
+            continue
+        adapter = values[f"roles.{role}.adapter"]
+        model = values[f"roles.{role}.model"]
+        if adapter in _LOCAL_ADAPTERS:
+            raise PolicyRefusal(
+                "provider_corrective_effort_not_applicable",
+                f"policy key 'roles.{role}.corrective_effort' is unavailable for local adapters",
+            )
+        try:
+            catalog_effort_schedule(adapter, model, corrective)
+        except ProviderBindingError as refusal:
+            raise PolicyRefusal(refusal.code, refusal.message) from None
+
     policy = ExecutionPolicy(
         schema_version=SCHEMA_VERSION,
+        index_mode=values["index_mode"],
         target=TargetPolicy(
             stop_at=values["target.stop_at"],
             max_slices=values["target.max_slices"],
@@ -370,6 +410,7 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             adapter=values["roles.architect.adapter"],
             model=values["roles.architect.model"],
             workspace_access=values["roles.architect.workspace_access"],
+            corrective_effort=values["roles.architect.corrective_effort"],
         ),
         coder=CoderPolicy(
             adapter=values["roles.coder.adapter"],
@@ -377,6 +418,7 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             workspace_access=values["roles.coder.workspace_access"],
             resume_within_slice=values["roles.coder.resume_within_slice"],
             resume_across_slices=values["roles.coder.resume_across_slices"],
+            corrective_effort=values["roles.coder.corrective_effort"],
         ),
         reviewer=ReviewerPolicy(
             adapter=values["roles.reviewer.adapter"],
@@ -385,6 +427,7 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             fresh_session_per_invocation=values[
                 "roles.reviewer.fresh_session_per_invocation"
             ],
+            corrective_effort=values["roles.reviewer.corrective_effort"],
         ),
         shadow_reviewer=ShadowReviewerPolicy(
             enabled=values["roles.shadow_reviewer.enabled"],
@@ -470,6 +513,12 @@ def _section_table(document: dict, section_path: tuple[str, ...]) -> dict:
 def _validate_field(
     dotted: str, kind: str, value: object, allowed: tuple[str, ...]
 ) -> object:
+    if kind == "optional_effort":
+        if type(value) is not str:
+            raise PolicyRefusal(
+                "field_type_invalid", f"policy key '{dotted}' must be a string"
+            )
+        return value
     if kind == "bool":
         if type(value) is not bool:
             raise PolicyRefusal(
@@ -506,7 +555,7 @@ def _validate_field(
                 f"policy key '{dotted}' must remain under local_state/",
             )
         return value
-    if kind in ("enum", "fixed"):
+    if kind in ("enum", "fixed", "optional_enum"):
         if type(value) is not str:
             raise PolicyRefusal(
                 "field_type_invalid", f"policy key '{dotted}' must be a string"

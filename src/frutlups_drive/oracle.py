@@ -13,12 +13,18 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from frutlups_drive.policy import INDEX_MODES
+
 
 INDEX_PATH = "05_governance/reviews/INDEX.md"
 MAX_ORACLE_INPUT_BYTES = 16 * 1024 * 1024
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _SLICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_PASS_ID = re.compile(r"holistic_pass_[0-9]{3}")
+_DRAIN_ANNOTATION = re.compile(
+    r"addressed by rework round [1-9][0-9]*; re-confirm or refute against it"
+)
 _BACKTICK = re.compile(r"`([^`\r\n]+)`")
 _RECORD_SLICE = re.compile(
     r"^Slice ID:\s*`(?P<value>[A-Za-z0-9][A-Za-z0-9._-]*)`\s*$",
@@ -44,6 +50,7 @@ OBSERVATION_CLASSES = frozenset(
         "artifact_hash_drift",
         "evidence_hash_drift",
         "index_path_not_in_manifest",
+        "ledger_row_in_no_ledger_project",
         "manifest_review_artifact_not_indexed",
         "verdict_record_invalid",
         "verdict_record_missing",
@@ -72,6 +79,13 @@ class _AcceptedRow:
     self_report: str | None
     review_report: str | None
     verdict: str
+    cited_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _LedgerRow:
+    slice_id: str | None
+    cited_paths: tuple[str, ...]
 
 
 def reconcile_pass_boundary(
@@ -79,6 +93,7 @@ def reconcile_pass_boundary(
     project_root: Path | str,
     evidence_root: Path | str,
     *,
+    index_mode: str = "human-ledger",
     max_file_bytes: int = MAX_ORACLE_INPUT_BYTES,
 ) -> dict[str, object]:
     """Return one deterministic reconciliation bundle without writing.
@@ -91,6 +106,10 @@ def reconcile_pass_boundary(
 
     if type(max_file_bytes) is not int or max_file_bytes <= 0:
         raise ValueError("max_file_bytes must be a positive integer")
+    if index_mode not in INDEX_MODES:
+        raise OracleRefusal(
+            "index_mode_invalid", "the declared review-index mode is unsupported"
+        )
     record = _checked_boundary(pass_boundary)
     project = _checked_root(project_root, "project_root_unreadable")
     evidence = _checked_root(evidence_root, "evidence_root_unreadable")
@@ -130,25 +149,37 @@ def reconcile_pass_boundary(
     observations: list[dict[str, object]] = []
 
     rows, cited = _index_rows(index_text)
-    for path, slices in sorted(cited.items()):
-        if path not in artifact_map:
-            observations.append(
-                _observation(
-                    "index_path_not_in_manifest",
-                    next(iter(slices)) if len(slices) == 1 else None,
-                    [path],
-                    artifact_map,
-                    observed_artifacts,
+    if index_mode == "human-ledger":
+        for path, slices in sorted(cited.items()):
+            if path not in artifact_map:
+                observations.append(
+                    _observation(
+                        "index_path_not_in_manifest",
+                        next(iter(slices)) if len(slices) == 1 else None,
+                        [path],
+                        artifact_map,
+                        observed_artifacts,
+                    )
                 )
-            )
 
-    for path in sorted(artifact_map):
-        if _review_side_artifact(path) and path not in cited:
+        for path in sorted(artifact_map):
+            if _review_side_artifact(path) and path not in cited:
+                observations.append(
+                    _observation(
+                        "manifest_review_artifact_not_indexed",
+                        _slice_from_path(path),
+                        [path],
+                        artifact_map,
+                        observed_artifacts,
+                    )
+                )
+    else:
+        for row in _ledger_rows(index_text):
             observations.append(
                 _observation(
-                    "manifest_review_artifact_not_indexed",
-                    _slice_from_path(path),
-                    [path],
+                    "ledger_row_in_no_ledger_project",
+                    row.slice_id,
+                    list(row.cited_paths) or [INDEX_PATH],
                     artifact_map,
                     observed_artifacts,
                 )
@@ -191,6 +222,25 @@ def reconcile_pass_boundary(
                 )
             )
 
+    draining_rounds: dict[str, int] = {}
+    if "events.jsonl" in evidence_map:
+        events_data = _read_named(
+            evidence, "events.jsonl", max_file_bytes, code="evidence_unreadable"
+        )
+        primary_events = [
+            event
+            for _, event in _event_records(events_data)
+            if event.get("kind") not in ("shadow_review", "memory_hook")
+        ]
+        draining_rounds = _draining_rework_rounds(primary_events)
+    for observation in observations:
+        round_number = draining_rounds.get(str(observation.get("slice_id", "")))
+        if round_number is not None:
+            observation["annotation"] = (
+                f"addressed by rework round {round_number}; "
+                "re-confirm or refute against it"
+            )
+
     observations.sort(
         key=lambda item: (
             str(item["class"]),
@@ -202,6 +252,7 @@ def reconcile_pass_boundary(
     return {
         "contract_version": 1,
         "run_id": record["run_id"],
+        "index_mode": index_mode,
         "pass_boundary_sha256": hashlib.sha256(
             _canonical_json_bytes(record)
         ).hexdigest(),
@@ -213,6 +264,7 @@ def valid_oracle_bundle(
     payload: object,
     run_id: str,
     pass_boundary_sha256: str,
+    index_mode: str = "human-ledger",
 ) -> bool:
     """Validate the exact persisted bundle schema without interpreting it."""
 
@@ -222,19 +274,34 @@ def valid_oracle_bundle(
         != {
             "contract_version",
             "run_id",
+            "index_mode",
             "pass_boundary_sha256",
             "observations",
         }
         or payload.get("contract_version") != 1
         or payload.get("run_id") != run_id
+        or payload.get("index_mode") != index_mode
+        or index_mode not in INDEX_MODES
         or payload.get("pass_boundary_sha256") != pass_boundary_sha256
         or not isinstance(payload.get("observations"), list)
     ):
         return False
     for observation in payload["observations"]:
+        keys = set(observation) if isinstance(observation, dict) else set()
         if (
             not isinstance(observation, dict)
-            or set(observation) != {"type", "class", "slice_id", "paths", "hashes"}
+            or keys
+            not in (
+                {"type", "class", "slice_id", "paths", "hashes"},
+                {
+                    "type",
+                    "class",
+                    "slice_id",
+                    "paths",
+                    "hashes",
+                    "annotation",
+                },
+            )
             or observation.get("type") != "oracle_observation"
             or observation.get("class") not in OBSERVATION_CLASSES
             or (
@@ -249,6 +316,14 @@ def valid_oracle_bundle(
             or len(set(observation["paths"])) != len(observation["paths"])
             or any(not _canonical_relative(path) for path in observation["paths"])
             or not isinstance(observation.get("hashes"), list)
+            or (
+                "annotation" in observation
+                and (
+                    observation.get("slice_id") is None
+                    or not isinstance(observation.get("annotation"), str)
+                    or not _DRAIN_ANNOTATION.fullmatch(observation["annotation"])
+                )
+            )
         ):
             return False
         for pointer in observation["hashes"]:
@@ -354,6 +429,14 @@ def _verify_inventory(
 
 def _primary_events_digest(data: bytes) -> str:
     primary: list[bytes] = []
+    for line, event in _event_records(data):
+        if event.get("kind") not in ("shadow_review", "memory_hook"):
+            primary.append(line)
+    return hashlib.sha256(b"".join(primary)).hexdigest()
+
+
+def _event_records(data: bytes) -> list[tuple[bytes, dict[str, object]]]:
+    records: list[tuple[bytes, dict[str, object]]] = []
     for line in data.splitlines(keepends=True):
         if not line.endswith(b"\n"):
             raise OracleRefusal(
@@ -369,9 +452,185 @@ def _primary_events_digest(data: bytes) -> str:
             raise OracleRefusal(
                 "evidence_unreadable", "events.jsonl contains a non-object event"
             )
-        if event.get("kind") not in ("shadow_review", "memory_hook"):
-            primary.append(line)
-    return hashlib.sha256(b"".join(primary)).hexdigest()
+        records.append((line, event))
+    return records
+
+
+def _draining_rework_rounds(
+    events: list[dict[str, object]],
+) -> dict[str, int]:
+    """Return only journal-proven, unambiguous post-declaration drains."""
+
+    declarations: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        if event.get("kind") != "verb" or event.get("verb") != "declare-rework":
+            continue
+        slices = event.get("slices")
+        if not isinstance(slices, list):
+            continue
+        for slice_id in slices:
+            if isinstance(slice_id, str):
+                declarations.setdefault(slice_id, []).append(index)
+
+    drained: dict[str, int] = {}
+    for slice_id, positions in declarations.items():
+        if len(positions) != 1 or not _SLICE_ID.fullmatch(slice_id):
+            continue
+        declaration = events[positions[0]]
+        slices = declaration.get("slices")
+        if (
+            not isinstance(slices, list)
+            or not slices
+            or any(
+                not isinstance(item, str) or not _SLICE_ID.fullmatch(item)
+                for item in slices
+            )
+            or len(slices) != len(set(slices))
+            or not isinstance(declaration.get("pass_id"), str)
+            or not _PASS_ID.fullmatch(declaration["pass_id"])
+        ):
+            continue
+        round_number = _strict_drain_round(
+            events, positions[0] + 1, slice_id
+        )
+        if round_number is not None:
+            drained[slice_id] = round_number
+    return drained
+
+
+def _strict_drain_round(
+    events: list[dict[str, object]], start: int, slice_id: str
+) -> int | None:
+    verdicts = [
+        index
+        for index in range(start, len(events))
+        if events[index].get("kind") == "verb"
+        and events[index].get("verb") == "record-verdict"
+        and events[index].get("slice") == slice_id
+        and _canonical_relative(events[index].get("artifact"))
+    ]
+    if len(verdicts) != 1:
+        return None
+    verdict_index = verdicts[0]
+
+    coder_dispatches = [
+        index
+        for index in range(start, verdict_index)
+        if events[index].get("kind") == "dispatch"
+        and events[index].get("role") == "coder"
+        and events[index].get("slice") == slice_id
+        and events[index].get("repair") is False
+        and isinstance(events[index].get("attempt"), str)
+        and bool(events[index].get("attempt"))
+        and _canonical_relative(events[index].get("prompt_source"))
+    ]
+    if not coder_dispatches:
+        return None
+    coder_index = coder_dispatches[-1]
+    if any(
+        event.get("kind") == "dispatch"
+        and event.get("role") == "coder"
+        and event.get("slice") == slice_id
+        for event in events[coder_index + 1 : verdict_index]
+    ):
+        return None
+    coder = events[coder_index]
+    coder_attempt = coder["attempt"]
+    coding_source = coder["prompt_source"]
+    coding_prompts = [
+        index
+        for index in range(start, coder_index)
+        if events[index].get("kind") == "verb"
+        and events[index].get("verb") == "make-coding-prompt"
+        and events[index].get("slice") == slice_id
+        and events[index].get("artifact") == coding_source
+    ]
+    if len(coding_prompts) != 1:
+        return None
+
+    coder_collections = [
+        index
+        for index in range(coder_index + 1, verdict_index)
+        if events[index].get("kind") == "collected"
+        and events[index].get("role") == "coder"
+        and events[index].get("slice") == slice_id
+    ]
+    if len(coder_collections) != 1:
+        return None
+    coder_collected = coder_collections[0]
+    if (
+        events[coder_collected].get("attempt") != coder_attempt
+        or events[coder_collected].get("status") != "completed"
+    ):
+        return None
+    verifications = [
+        index
+        for index in range(coder_collected + 1, verdict_index)
+        if events[index].get("kind") == "verification"
+        and events[index].get("slice") == slice_id
+    ]
+    if len(verifications) != 1:
+        return None
+    verified = verifications[0]
+    if (
+        events[verified].get("attempt") != coder_attempt
+        or events[verified].get("passed") is not True
+    ):
+        return None
+
+    reviewer_dispatches = [
+        index
+        for index in range(verified + 1, verdict_index)
+        if events[index].get("kind") == "dispatch"
+        and events[index].get("role") == "reviewer"
+        and events[index].get("slice") == slice_id
+    ]
+    if len(reviewer_dispatches) != 1:
+        return None
+    reviewer_index = reviewer_dispatches[0]
+    reviewer = events[reviewer_index]
+    if (
+        reviewer.get("repair") is not False
+        or not isinstance(reviewer.get("attempt"), str)
+        or not reviewer.get("attempt")
+        or not _canonical_relative(reviewer.get("prompt_source"))
+    ):
+        return None
+    reviewer_attempt = reviewer["attempt"]
+    review_source = reviewer["prompt_source"]
+    review_prompts = [
+        index
+        for index in range(verified + 1, reviewer_index)
+        if events[index].get("kind") == "verb"
+        and events[index].get("verb") == "make-review-prompt"
+        and events[index].get("slice") == slice_id
+        and events[index].get("artifact") == review_source
+    ]
+    if len(review_prompts) != 1:
+        return None
+    reviewer_collections = [
+        index
+        for index in range(reviewer_index + 1, verdict_index)
+        if events[index].get("kind") == "collected"
+        and events[index].get("role") == "reviewer"
+        and events[index].get("slice") == slice_id
+    ]
+    if len(reviewer_collections) != 1:
+        return None
+    reviewer_collected = reviewer_collections[0]
+    if (
+        events[reviewer_collected].get("attempt") != reviewer_attempt
+        or events[reviewer_collected].get("status") != "completed"
+    ):
+        return None
+
+    prior_coder_collections = sum(
+        event.get("kind") == "collected"
+        and event.get("role") == "coder"
+        and event.get("slice") == slice_id
+        for event in events[start:coder_index]
+    )
+    return prior_coder_collections + 1
 
 
 def _index_rows(text: str) -> tuple[list[_AcceptedRow], dict[str, set[str]]]:
@@ -382,13 +641,20 @@ def _index_rows(text: str) -> tuple[list[_AcceptedRow], dict[str, set[str]]]:
         if not stripped.startswith("|") or not stripped.endswith("|"):
             continue
         cells = [cell.strip() for cell in stripped.strip("|").split("|")]
-        if len(cells) != 8 or not _SLICE_ID.fullmatch(cells[1]):
+        if (
+            len(cells) != 8
+            or cells[1].lower() == "slice"
+            or not _SLICE_ID.fullmatch(cells[1])
+        ):
             continue
         slice_id = cells[1]
+        row_paths: list[str] = []
         for match in _BACKTICK.finditer(line):
             path = match.group(1)
             if _artifact_path(path):
                 citations.setdefault(path, set()).add(slice_id)
+                if path not in row_paths:
+                    row_paths.append(path)
         verdict = cells[6].lower()
         rows.append(
             _AcceptedRow(
@@ -396,9 +662,43 @@ def _index_rows(text: str) -> tuple[list[_AcceptedRow], dict[str, set[str]]]:
                 self_report=_first_path(cells[3]),
                 review_report=_first_path(cells[5]),
                 verdict=verdict,
+                cited_paths=tuple(row_paths),
             )
         )
     return rows, citations
+
+
+def _ledger_rows(text: str) -> list[_LedgerRow]:
+    """Return every non-template Markdown table row, valid or malformed."""
+
+    rows: list[_LedgerRow] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("|") or not stripped.endswith("|"):
+            continue
+        cells = [cell.strip() for cell in stripped.strip("|").split("|")]
+        if (
+            (len(cells) > 1 and cells[1].lower() == "slice")
+            or (
+                cells
+                and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+            )
+        ):
+            continue
+        cited_paths = tuple(
+            dict.fromkeys(
+                match.group(1)
+                for match in _BACKTICK.finditer(line)
+                if _artifact_path(match.group(1))
+            )
+        )
+        slice_id = (
+            cells[1]
+            if len(cells) > 1 and _SLICE_ID.fullmatch(cells[1])
+            else None
+        )
+        rows.append(_LedgerRow(slice_id=slice_id, cited_paths=cited_paths))
+    return rows
 
 
 def _first_path(cell: str) -> str | None:
@@ -421,6 +721,24 @@ def _review_side_artifact(path: str) -> bool:
         and path.endswith(("_self_report.md", "_review_report.md"))
     ) or (
         path.startswith("prompts/for_review_agent/") and path.endswith(".md")
+    )
+
+
+def rework_protected_artifact(path: str) -> bool:
+    """Return whether a frozen artifact is protected during coder rework.
+
+    This deliberately leaves the holistic oracle's narrower review-side
+    predicate unchanged.  The rework fence additionally protects verdict
+    records and governed coding prompts while excluding product/code paths.
+    """
+
+    if not _canonical_relative(path):
+        return False
+    return _review_side_artifact(path) or (
+        path.startswith("05_governance/reviews/")
+        and path.endswith("_verdict_record.md")
+    ) or (
+        path.startswith("prompts/for_coding_agent/") and path.endswith(".md")
     )
 
 

@@ -20,6 +20,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from frutlups_drive.contracts import AgentRunRequest, AgentRunResult
 from frutlups_drive.dispatch.subprocess_agent import (
@@ -27,24 +28,60 @@ from frutlups_drive.dispatch.subprocess_agent import (
     SubprocessAgentExecutor,
     SubprocessAgentFailure,
 )
-from frutlups_drive.livegate import LiveGateDeclaration
 from frutlups_drive.verifier import ProcessRunner
+
+if TYPE_CHECKING:
+    from frutlups_drive.livegate import LiveGateDeclaration
 
 PROVIDER_BINDING_SCHEMA_VERSION = "frutlups_drive_provider_binding_v1"
 PROVIDER_BINDING_RELATIVE_PATH = "local_state/provider_binding.toml"
 APPROVED_PROVIDER_ADAPTERS = ("codex_cli", "kimi_cli", "claude_cli")
+
+
+
+
+@dataclass(frozen=True)
+class ProviderSeatCatalogEntry:
+    """Verified effort vocabulary and the one fixed project schedule."""
+
+    effort_vocabulary: tuple[str, ...]
+    default_effort: str
+    corrective_effort: str
+    corrective_dispatch_supported: bool = True
+
+
+_CODEX_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 APPROVED_SEAT_CATALOG = {
     "codex_cli": {
-        "gpt-5.6-sol": "medium",
-        "gpt-5.6-terra": "medium",
-        "gpt-5.6-luna": "medium",
+        "gpt-5.6-sol": ProviderSeatCatalogEntry(
+            _CODEX_EFFORTS, "medium", "high"
+        ),
+        "gpt-5.6-terra": ProviderSeatCatalogEntry(
+            _CODEX_EFFORTS, "medium", "medium"
+        ),
+        "gpt-5.6-luna": ProviderSeatCatalogEntry(
+            _CODEX_EFFORTS, "medium", "medium"
+        ),
     },
     "kimi_cli": {
-        "kimi-code/k3": "high",
-        "kimi-code/kimi-for-coding": "high",
-        "kimi-code/kimi-for-coding-highspeed": "high",
+        "kimi-code/k3": ProviderSeatCatalogEntry(
+            ("low", "high", "max"), "high", "max", False
+        ),
+        # Minimal verified effort set: pinned default only; full support_efforts unverified.
+        "kimi-code/kimi-for-coding": ProviderSeatCatalogEntry(
+            ("high",), "high", "high", False
+        ),
+        # Minimal verified effort set: pinned default only; full support_efforts unverified.
+        "kimi-code/kimi-for-coding-highspeed": ProviderSeatCatalogEntry(
+            ("high",), "high", "high", False
+        ),
     },
-    "claude_cli": {"claude-opus-5": "high"},
+    "claude_cli": {
+        "claude-opus-5": ProviderSeatCatalogEntry(
+            _CLAUDE_EFFORTS, "high", "xhigh"
+        )
+    },
 }
 WINDOWS_PROCESS_ENV_NAMES = ("SYSTEMROOT",)
 BYTECODE_HYGIENE_ENV = ("PYTHONDONTWRITEBYTECODE", "1")
@@ -281,7 +318,7 @@ def load_provider_binding(path: Path | str) -> ProviderLaunchBundle:
             "no approved Kimi catalog entry is configured",
         )
     for model, effective in kimi_effective_efforts:
-        if effective != APPROVED_SEAT_CATALOG["kimi_cli"][model]:
+        if effective != APPROVED_SEAT_CATALOG["kimi_cli"][model].default_effort:
             raise ProviderBindingError(
                 "kimi_effort_not_high",
                 "an approved Kimi catalog entry does not resolve to pinned effort high",
@@ -301,6 +338,10 @@ def load_provider_binding(path: Path | str) -> ProviderLaunchBundle:
 
 
 def _catalog_effort(adapter: str, model: str) -> str:
+    return _catalog_entry(adapter, model).default_effort
+
+
+def _catalog_entry(adapter: str, model: str) -> ProviderSeatCatalogEntry:
     try:
         return APPROVED_SEAT_CATALOG[adapter][model]
     except KeyError:
@@ -308,6 +349,59 @@ def _catalog_effort(adapter: str, model: str) -> str:
             "provider_seat_mismatch",
             "the adapter/model pair is outside the approved provider catalog",
         ) from None
+
+
+def catalog_effort_schedule(
+    adapter: str,
+    model: str,
+    corrective_effort: str | None = None,
+) -> tuple[str, str]:
+    """Resolve one declared schedule or raise a stable fail-closed refusal.
+
+    Omission means no escalation. A present value must be in the verified
+    vocabulary, match either the default or the catalog's ruled corrective
+    position, remain within one rung, and be expressible per dispatch.
+    Values are never normalized or clamped.
+    """
+
+    entry = _catalog_entry(adapter, model)
+    corrective = (
+        entry.default_effort if corrective_effort is None else corrective_effort
+    )
+    if type(corrective) is not str or corrective not in entry.effort_vocabulary:
+        raise ProviderBindingError(
+            "provider_effort_unknown",
+            "the declared corrective effort is outside the model's verified vocabulary",
+        )
+    default_index = entry.effort_vocabulary.index(entry.default_effort)
+    corrective_index = entry.effort_vocabulary.index(corrective)
+    allowed_index = entry.effort_vocabulary.index(entry.corrective_effort)
+    if corrective not in (entry.default_effort, entry.corrective_effort):
+        if corrective_index == allowed_index + 1:
+            raise ProviderBindingError(
+                "provider_corrective_effort_not_allowed",
+                "the declared corrective effort is excluded from the catalog position",
+            )
+        if corrective_index > default_index + 1:
+            raise ProviderBindingError(
+                "provider_corrective_effort_too_high",
+                "the declared corrective effort is more than one verified rung above default",
+            )
+        raise ProviderBindingError(
+            "provider_corrective_effort_not_allowed",
+            "the declared corrective effort is not the catalog's allowed position",
+        )
+    if corrective_index > default_index + 1:
+        raise ProviderBindingError(
+            "provider_corrective_effort_too_high",
+            "the declared corrective effort is more than one verified rung above default",
+        )
+    if corrective != entry.default_effort and not entry.corrective_dispatch_supported:
+        raise ProviderBindingError(
+            "provider_corrective_effort_unsupported",
+            "the provider CLI cannot express the declared corrective effort per dispatch",
+        )
+    return entry.default_effort, corrective
 
 
 def build_provider_runtime(
@@ -324,13 +418,27 @@ def build_provider_runtime(
     """
 
     declared_seats = (
-        (declaration.coder_adapter, declaration.coder_model),
-        (declaration.reviewer_adapter, declaration.reviewer_model),
-        (declaration.architect_adapter, declaration.architect_model),
+        (
+            declaration.coder_adapter,
+            declaration.coder_model,
+            declaration.coder_corrective_effort,
+        ),
+        (
+            declaration.reviewer_adapter,
+            declaration.reviewer_model,
+            declaration.reviewer_corrective_effort,
+        ),
+        (
+            declaration.architect_adapter,
+            declaration.architect_model,
+            declaration.architect_corrective_effort,
+        ),
     )
     kimi_effective = dict(bundle.kimi_effective_efforts)
-    for adapter, model in declared_seats:
-        pinned_effort = _catalog_effort(adapter, model)
+    for adapter, model, corrective_effort in declared_seats:
+        pinned_effort, _ = catalog_effort_schedule(
+            adapter, model, corrective_effort
+        )
         if adapter == "kimi_cli" and kimi_effective.get(model) != pinned_effort:
             raise ProviderBindingError(
                 "kimi_effort_not_high",
@@ -378,14 +486,31 @@ def provider_efforts() -> dict[str, str]:
     }
 
 
+def provider_effort_schedules(
+    declaration: LiveGateDeclaration,
+) -> dict[str, tuple[str, str]]:
+    """Resolve the gate-fixed default/corrective schedule for each role."""
+
+    return {
+        role: catalog_effort_schedule(
+            getattr(declaration, f"{role}_adapter"),
+            getattr(declaration, f"{role}_model"),
+            getattr(declaration, f"{role}_corrective_effort"),
+        )
+        for role in ("architect", "coder", "reviewer")
+    }
+
+
 def _provider_argv(
     launch: ProviderLaunch,
     request: AgentRunRequest,
     prompt: str,
     isolation_root: Path,
 ) -> tuple[str, ...]:
-    pinned_effort = _catalog_effort(launch.adapter, request.model)
-    if request.effort != pinned_effort:
+    default_effort, selected_effort = catalog_effort_schedule(
+        launch.adapter, request.model, request.effort
+    )
+    if request.effort not in (default_effort, selected_effort):
         raise ProviderBindingError(
             "provider_seat_mismatch", "the request does not match the approved provider seat"
         )
@@ -396,7 +521,7 @@ def _provider_argv(
             "--model",
             request.model,
             "-c",
-            f"model_reasoning_effort={pinned_effort}",
+            f"model_reasoning_effort={request.effort}",
             "-c",
             "service_tier=default",
             "--sandbox",
@@ -432,7 +557,7 @@ def _provider_argv(
         "--model",
         request.model,
         "--effort",
-        "high",
+        request.effort,
         "--permission-mode",
         "acceptEdits",
         "--tools",

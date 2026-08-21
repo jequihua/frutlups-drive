@@ -18,6 +18,7 @@ from frutlups_drive.dispatch.provider_cli import (
     ProviderBindingError,
     ProviderCliExecutor,
     build_provider_runtime,
+    catalog_effort_schedule,
     load_provider_binding,
 )
 from frutlups_drive.livegate import assess_live_gate
@@ -32,9 +33,11 @@ def gate_declaration(
     coder_model="gpt-5.6-sol",
     reviewer_model="kimi-code/k3",
     architect_model="claude-opus-5",
+    coder_corrective_effort=None,
+    reviewer_corrective_effort=None,
+    architect_corrective_effort=None,
 ):
-    return assess_live_gate(
-        {
+    source = {
             "approval_state": "approved",
             "approval_reference": "05_governance/human_owner_notes/099_test.md",
             "coder_adapter": "codex_cli",
@@ -57,7 +60,14 @@ def gate_declaration(
                 "human": "Stop on owner instruction.",
             },
         }
-    ).declaration
+    for role, effort in (
+        ("coder", coder_corrective_effort),
+        ("reviewer", reviewer_corrective_effort),
+        ("architect", architect_corrective_effort),
+    ):
+        if effort is not None:
+            source[f"{role}_corrective_effort"] = effort
+    return assess_live_gate(source).declaration
 
 
 class CapturingRunner:
@@ -116,7 +126,7 @@ class ProviderBindingCase(unittest.TestCase):
     def write_binding(self, *, executable=None):
         executable = str(executable or Path(sys.executable))
         def quoted(value):
-            return json.dumps(str(value).replace("\\", "/"))
+            return json.dumps(str(value).replace(chr(92), chr(47)))
         self.binding.write_text(
             f'schema_version = "{PROVIDER_BINDING_SCHEMA_VERSION}"\n'
             f'kimi_config_path = {quoted(self.config)}\n'
@@ -193,24 +203,46 @@ class ProviderBindingCase(unittest.TestCase):
 
 class BindingLoaderTests(ProviderBindingCase):
     def test_catalog_is_exact_and_excludes_floating_aliases(self):
+        sol = APPROVED_SEAT_CATALOG["codex_cli"]["gpt-5.6-sol"]
         self.assertEqual(
-            APPROVED_SEAT_CATALOG,
-            {
-                "codex_cli": {
-                    "gpt-5.6-sol": "medium",
-                    "gpt-5.6-terra": "medium",
-                    "gpt-5.6-luna": "medium",
-                },
-                "kimi_cli": {
-                    "kimi-code/k3": "high",
-                    "kimi-code/kimi-for-coding": "high",
-                    "kimi-code/kimi-for-coding-highspeed": "high",
-                },
-                "claude_cli": {"claude-opus-5": "high"},
-            },
+            sol.effort_vocabulary,
+            ("none", "low", "medium", "high", "xhigh", "max"),
         )
+        self.assertEqual((sol.default_effort, sol.corrective_effort),
+                         ("medium", "high"))
+        k3 = APPROVED_SEAT_CATALOG["kimi_cli"]["kimi-code/k3"]
+        self.assertEqual(k3.effort_vocabulary, ("low", "high", "max"))
+        self.assertEqual((k3.default_effort, k3.corrective_effort),
+                         ("high", "max"))
+        self.assertFalse(k3.corrective_dispatch_supported)
+        opus = APPROVED_SEAT_CATALOG["claude_cli"]["claude-opus-5"]
+        self.assertEqual((opus.default_effort, opus.corrective_effort),
+                         ("high", "xhigh"))
         self.assertNotIn("gpt-5.6", APPROVED_SEAT_CATALOG["codex_cli"])
         self.assertNotIn("opus", APPROVED_SEAT_CATALOG["claude_cli"])
+
+    def test_catalog_validates_membership_rung_exclusions_and_no_clamp(self):
+        self.assertEqual(
+            catalog_effort_schedule("codex_cli", "gpt-5.6-sol", "high"),
+            ("medium", "high"),
+        )
+        cases = (
+            ("codex_cli", "gpt-5.6-sol", "ultra", "provider_effort_unknown"),
+            ("codex_cli", "gpt-5.6-sol", "max",
+             "provider_corrective_effort_too_high"),
+            ("codex_cli", "gpt-5.6-sol", "xhigh",
+             "provider_corrective_effort_not_allowed"),
+            ("claude_cli", "claude-opus-5", "max",
+             "provider_corrective_effort_not_allowed"),
+            ("kimi_cli", "kimi-code/k3", "max",
+             "provider_corrective_effort_unsupported"),
+        )
+        for adapter, model, effort, code in cases:
+            with self.subTest(adapter=adapter, effort=effort):
+                with self.assertRaises(ProviderBindingError) as caught:
+                    catalog_effort_schedule(adapter, model, effort)
+                self.assertEqual(caught.exception.code, code)
+                self.assertNotEqual(effort, "high" if adapter == "codex_cli" else "xhigh")
 
     def test_valid_binding_hashes_executables_and_resolves_high(self):
         bundle = load_provider_binding(self.binding)
@@ -375,6 +407,23 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertNotIn("PATH", env)
         self.assertEqual(result.cost_usd, 0.0)
 
+    def test_codex_corrective_command_changes_exactly_the_effort_token(self):
+        runner = CapturingRunner()
+        executor = ProviderCliExecutor(
+            self.runtime(), "codex_cli", runner, self.root / "codex-corrective"
+        )
+        executor.execute(self.request(Role.CODER, effort="high"))
+        argv = runner.calls[0][0]
+        self.assertIn("model_reasoning_effort=high", argv)
+        baseline, _, _ = self.execute(Role.CODER)
+        baseline_argv = baseline[0]
+        self.assertEqual(
+            tuple("model_reasoning_effort=<effort>" if part.startswith(
+                "model_reasoning_effort=") else part for part in argv),
+            tuple("model_reasoning_effort=<effort>" if part.startswith(
+                "model_reasoning_effort=") else part for part in baseline_argv),
+        )
+
     def test_kimi_command_pins_model_and_has_no_effort_flag(self):
         call, result, runner = self.execute(Role.REVIEWER)
         argv, _, env, _ = call
@@ -387,6 +436,18 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertEqual(runner.stdin_bytes, [None])
         self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertEqual(result.cost_usd, 0.0)
+
+    def test_kimi_corrective_effort_refuses_before_spawn(self):
+        runner = CapturingRunner()
+        executor = ProviderCliExecutor(
+            self.runtime(), "kimi_cli", runner, self.root / "kimi-corrective"
+        )
+        with self.assertRaises(ProviderBindingError) as caught:
+            executor.execute(self.request(Role.REVIEWER, effort="max"))
+        self.assertEqual(
+            caught.exception.code, "provider_corrective_effort_unsupported"
+        )
+        self.assertEqual(runner.calls, [])
 
     def test_second_catalog_models_dispatch_with_their_pinned_efforts(self):
         cases = (
@@ -463,6 +524,20 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertEqual(timeout, 5.0)
         self.assertNotIn("PATH", env)
         self.assertEqual(result.cost_usd, 0.0)
+
+    def test_claude_corrective_command_changes_exactly_the_effort_token(self):
+        runner = CapturingRunner()
+        executor = ProviderCliExecutor(
+            self.runtime(), "claude_cli", runner, self.root / "claude-corrective"
+        )
+        executor.execute(self.request(Role.ARCHITECT, effort="xhigh"))
+        argv = runner.calls[0][0]
+        effort_index = argv.index("--effort") + 1
+        self.assertEqual(argv[effort_index], "xhigh")
+        baseline, _, _ = self.execute(Role.ARCHITECT)
+        baseline_argv = list(baseline[0])
+        baseline_argv[baseline_argv.index("--effort") + 1] = "xhigh"
+        self.assertEqual(tuple(baseline_argv), argv)
 
     def test_prompt_response_and_usage_text_are_captured_verbatim(self):
         _, result, _ = self.execute(Role.CODER)

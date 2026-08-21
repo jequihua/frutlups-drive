@@ -119,19 +119,23 @@ class ValidPolicyTests(PolicyTestCase):
         result = self.load(FULL_POLICY)
         policy = result.policy
         self.assertEqual(policy.schema_version, SCHEMA_VERSION)
+        self.assertEqual(policy.index_mode, "human-ledger")
         self.assertEqual(policy.target.stop_at, "milestone_complete")
         self.assertEqual(policy.target.max_slices, 25)
         self.assertEqual(policy.target.max_passes, 3)
         self.assertEqual(policy.architect.adapter, "manual")
         self.assertEqual(policy.architect.model, "")
         self.assertEqual(policy.architect.workspace_access, "read_only")
+        self.assertIsNone(policy.architect.corrective_effort)
         self.assertEqual(policy.coder.adapter, "mock")
         self.assertEqual(policy.coder.model, "claude-fable-5")
         self.assertEqual(policy.coder.workspace_access, "workspace_write")
         self.assertTrue(policy.coder.resume_within_slice)
         self.assertFalse(policy.coder.resume_across_slices)
+        self.assertIsNone(policy.coder.corrective_effort)
         self.assertEqual(policy.reviewer.adapter, "manual")
         self.assertTrue(policy.reviewer.fresh_session_per_invocation)
+        self.assertIsNone(policy.reviewer.corrective_effort)
         self.assertFalse(policy.shadow_reviewer.enabled)
         self.assertEqual(policy.shadow_reviewer.adapter, "mock")
         self.assertEqual(policy.shadow_reviewer.workspace_access, "read_only")
@@ -182,6 +186,24 @@ class ValidPolicyTests(PolicyTestCase):
         )
         self.assertEqual(result.policy.autonomy.pass_boundary, "two_clean")
 
+    def test_index_mode_absent_and_declared_values(self):
+        absent = self.load(f'schema_version = "{SCHEMA_VERSION}"\n')
+        human = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            'index_mode = "human-ledger"\n'
+        )
+        no_ledger = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            'index_mode = "no-ledger"\n'
+        )
+
+        self.assertEqual(absent.policy.index_mode, "human-ledger")
+        self.assertEqual(human.policy.index_mode, "human-ledger")
+        self.assertEqual(no_ledger.policy.index_mode, "no-ledger")
+        self.assertNotIn("index_mode", absent.defaulted)
+        self.assertEqual(human.warnings, ())
+        self.assertEqual(no_ledger.warnings, ())
+
     def test_shadow_reviewer_is_explicit_read_only_and_bounded(self):
         result = self.load(
             f'schema_version = "{SCHEMA_VERSION}"\n'
@@ -216,6 +238,8 @@ class ValidPolicyTests(PolicyTestCase):
         self.assertEqual(policy.network.default, "deny")
         self.assertFalse(policy.memory.upgrade_via_flag)
         self.assertEqual(policy.frutlups.package_identity, "")
+        self.assertEqual(policy.index_mode, "human-ledger")
+        self.assertNotIn("index_mode", result.defaulted)
         self.assertFalse(policy.shadow_reviewer.enabled)
         self.assertEqual(policy.limits.max_shadow_attempts_per_slice, 1)
 
@@ -228,6 +252,21 @@ class ValidPolicyTests(PolicyTestCase):
         self.assertNotIn("limits.max_total_cost_usd", result.defaulted)
         self.assertIn("limits.max_report_repairs", result.defaulted)
         self.assertEqual(result.policy.limits.max_total_cost_usd, 1.5)
+
+    def test_valid_corrective_efforts_load_without_becoming_defaults(self):
+        result = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            '[roles.architect]\nadapter = "claude_cli"\n'
+            'model = "claude-opus-5"\ncorrective_effort = "xhigh"\n'
+            '[roles.coder]\nadapter = "codex_cli"\n'
+            'model = "gpt-5.6-sol"\ncorrective_effort = "high"\n'
+            '[roles.reviewer]\nadapter = "kimi_cli"\n'
+            'model = "kimi-code/k3"\ncorrective_effort = "high"\n'
+        )
+        self.assertEqual(result.policy.architect.corrective_effort, "xhigh")
+        self.assertEqual(result.policy.coder.corrective_effort, "high")
+        self.assertEqual(result.policy.reviewer.corrective_effort, "high")
+        self.assertNotIn("roles.coder.corrective_effort", result.defaulted)
 
     def test_money_accepts_toml_integer(self):
         result = self.load(
@@ -296,6 +335,8 @@ class PolicyRefusalTests(PolicyTestCase):
     def test_enum_type_and_range_refusals(self):
         header = f'schema_version = "{SCHEMA_VERSION}"\n'
         cases = [
+            ('index_mode = "inferred"\n', "enum_value_unknown"),
+            ("index_mode = true\n", "field_type_invalid"),
             ('[target]\nstop_at = "when_done"\n', "enum_value_unknown"),
             ('[roles.coder]\nadapter = "gpt_cli"\n', "enum_value_unknown"),
             ('[roles.coder]\nworkspace_access = "admin"\n', "enum_value_unknown"),
@@ -324,6 +365,27 @@ class PolicyRefusalTests(PolicyTestCase):
         ]
         for body, code in cases:
             with self.subTest(body=body):
+                self.assert_refused(header + body, code)
+
+    def test_invalid_corrective_efforts_refuse_at_policy_load(self):
+        header = f'schema_version = "{SCHEMA_VERSION}"\n'
+        cases = (
+            ('[roles.coder]\nadapter = "codex_cli"\nmodel = "gpt-5.6-sol"\n'
+             'corrective_effort = "ultra"\n', "provider_effort_unknown"),
+            ('[roles.coder]\nadapter = "codex_cli"\nmodel = "gpt-5.6-sol"\n'
+             'corrective_effort = "max"\n',
+             "provider_corrective_effort_too_high"),
+            ('[roles.coder]\nadapter = "codex_cli"\nmodel = "gpt-5.6-sol"\n'
+             'corrective_effort = "xhigh"\n',
+             "provider_corrective_effort_not_allowed"),
+            ('[roles.reviewer]\nadapter = "kimi_cli"\nmodel = "kimi-code/k3"\n'
+             'corrective_effort = "max"\n',
+             "provider_corrective_effort_unsupported"),
+            ('[roles.coder]\nadapter = "manual"\ncorrective_effort = "high"\n',
+             "provider_corrective_effort_not_applicable"),
+        )
+        for body, code in cases:
+            with self.subTest(code=code):
                 self.assert_refused(header + body, code)
 
     def test_fixed_policy_boundaries(self):

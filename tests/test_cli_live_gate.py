@@ -90,6 +90,30 @@ class LiveGateCliTests(CliTestCase):
         )
         self.assert_pre_store_refusal("live_authority_missing")
 
+    def test_corrective_effort_mismatch_on_either_side_refuses(self):
+        cases = (
+            (
+                EXTERNAL_POLICY.replace(
+                    b'model = "gpt-5.6-sol"',
+                    b'model = "gpt-5.6-sol"\ncorrective_effort = "high"',
+                ),
+                gate_markdown(),
+            ),
+            (
+                EXTERNAL_POLICY,
+                gate_markdown().replace(
+                    'coder_model = "gpt-5.6-sol"',
+                    'coder_model = "gpt-5.6-sol"\n'
+                    'coder_corrective_effort = "high"',
+                ),
+            ),
+        )
+        for policy, gate in cases:
+            with self.subTest(policy_corrective=b"corrective_effort" in policy):
+                (self.project / "frutlups_drive.toml").write_bytes(policy)
+                self.gate.write_text(gate, encoding="utf-8")
+                self.assert_pre_store_refusal("live_authority_missing")
+
     def test_ready_gate_then_absent_local_binding_refuses_before_store(self):
         self.gate.write_text(gate_markdown(), encoding="utf-8")
         self.assertFalse(

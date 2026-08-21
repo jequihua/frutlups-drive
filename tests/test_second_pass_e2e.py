@@ -308,6 +308,17 @@ class _PlanningSequence:
         return self._states.pop(0)
 
 
+class _RecordingPlanProvider:
+    def __init__(self, provider):
+        self._provider = provider
+        self.states = []
+
+    def read_planning_state(self):
+        state = self._provider.read_planning_state()
+        self.states.append(state)
+        return state
+
+
 class _SecondPassExecutor:
     """Request-shaped mock seat; artifact paths come only from the request."""
 
@@ -818,6 +829,8 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         supervisor, store = self._supervisor(
             project, ("M001-S02",), needs_work_first=True
         )
+        planning = _RecordingPlanProvider(supervisor._plan_provider)
+        supervisor._plan_provider = planning
         result = supervisor.run_until()
         self.assertEqual(
             (result.kind, result.detail),
@@ -831,6 +844,20 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         self.assertEqual(verbs.count("make-review-prompt"), 2)
         self.assertEqual(verbs.count("record-verdict"), 1)
         self.assertEqual(supervisor._missing_worklist_slices(), ())
+        corrective_frontier_rounds = [
+            state.frontier.round
+            for state in planning.states
+            if state.frontier is not None
+            and state.frontier.slice_id == "M001-S02"
+            and state.step in (LoopStep.MAKE_REVIEW_PROMPT, LoopStep.EXECUTE_REVIEW_PROMPT)
+            and state.artifacts.coding_prompt is not None
+        ]
+        self.assertTrue(corrective_frontier_rounds)
+        self.assertEqual(
+            set(corrective_frontier_rounds),
+            {1},
+            "released frutlups must not carry an accepted lifecycle's round forward",
+        )
 
     def test_consecutive_nonclean_passes_get_distinct_declarations(self):
         project = self._project("consecutive")

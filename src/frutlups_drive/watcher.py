@@ -19,6 +19,7 @@ class WatchResult:
     ok: bool
     waited_seconds: float
     stop_requested: bool = False
+    protected_change: bool = False
 
 
 class Watcher:
@@ -33,6 +34,7 @@ class Watcher:
         poll_seconds: float = 0.05,
         stability_checks: int = 2,
         stop_requested: Callable[[], bool] | None = None,
+        protected_changed: Callable[[], bool] | None = None,
     ) -> WatchResult:
         started = self._clock.now()
         deadline = started + timeout_seconds
@@ -43,6 +45,20 @@ class Watcher:
                 return WatchResult(
                     False, self._clock.now() - started, stop_requested=True
                 )
+            if protected_changed is not None:
+                try:
+                    changed = protected_changed()
+                except Exception:
+                    # An unreadable or unhashable protected member cannot be
+                    # distinguished safely from mutation, so observation is
+                    # fail-closed.
+                    changed = True
+                if changed:
+                    return WatchResult(
+                        False,
+                        self._clock.now() - started,
+                        protected_change=True,
+                    )
             sizes = _observe(paths)
             if sizes is not None:
                 if sizes == previous_sizes:
