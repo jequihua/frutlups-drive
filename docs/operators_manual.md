@@ -1,13 +1,15 @@
-# The frutlups-drive Operator's Manual (v1)
+# The frutlups-drive Operator's Manual
 
 A human-friendly guide to opening, initializing, and executing a fully
 autonomous, milestone-structured development project with template v3,
-frutlups, and frutlups-drive — as they exist in closed version 1.
+frutlups, and frutlups-drive.
 
-Everything here describes shipped behavior proven by the v1 closure
-campaigns. Where a step needs a governance decision, the manual says so
-explicitly: autonomy in this system is always bounded by something a
-human ruled.
+Current as of closed version 4: frutlups-drive 0.4.0, released
+frutlups 0.1.8, released llloom 0.1.2, and a template v3 whose reviews
+INDEX ships header-only. Sections first written at version 1 remain
+accurate unless a later-version delta below says otherwise. Where a
+step needs a governance decision, the manual says so explicitly:
+autonomy in this system is always bounded by something a human ruled.
 
 ---
 
@@ -19,9 +21,9 @@ human ruled.
   short live state file (`PROJECT_STATE.md`).
 - **frutlups** is the *planning interpreter*: a separate CLI that reads
   the roadmap, reviews, and verdicts, and answers exactly one question —
-  "what is the next governed step?" — plus three governed artifact verbs
-  (make a coding prompt, make a review prompt, record a verdict). It
-  never executes anything.
+  "what is the next governed step?" — plus four governed artifact verbs
+  (declare bounded rework, make a coding prompt, make a review prompt,
+  record a verdict). It never executes anything.
 - **frutlups-drive** is the *supervisor*: it reads frutlups' answer,
   dispatches real model seats (architect, coder, reviewer) as sandboxed
   subprocesses, verifies results, enforces budgets and fences, journals
@@ -69,7 +71,8 @@ working skeleton, all committed as a pristine baseline before any run:
   workspace — see section 4. The active file carries milestone identity
   and status; the development file carries each milestone's `Slices:`
   bullet breakdown. The active file is the guarded runtime-architect
-  reconciliation target.
+  reconciliation target. Both files must expose the identical
+  milestone/slice spine.
 - A governance workspace with a reviews directory (reports, verdicts,
   and self-reports land here through governed verbs and seat turns).
 - Prompt templates (coding prompt, review prompt, self-report) under
@@ -79,14 +82,29 @@ working skeleton, all committed as a pristine baseline before any run:
   touch) with its verification command declared in the roadmap.
 - The frutlups layout declaration (frutlups.layout.yaml at the project
   root) and the drive policy file (section 5).
-- A stay-in-workspace instruction inside every generated prompt surface
-  — the templates carry it so every seat is told, every turn, to touch
-  nothing outside the project.
+- A stay-in-workspace instruction in every seat prompt. The drive's
+  dispatch envelope tells every seat, every turn, that confinement covers
+  files, processes, and system state. Seats never enumerate or manage host
+  processes, launch only declared-verification children and let them finish,
+  and make no host-level install, environment, configuration, or settings
+  change. A suspected runaway process, busy port, locked file, or other host
+  problem is reported in the self-report, never remediated by the seat.
 
 Rules of thumb learned the hard way in v1: commit the baseline before
 any dispatch (drive diffs everything against it); remember git cannot
 represent empty directories, so seed keep-files where a directory must
 exist; and never hand-edit anything under the run store.
+
+Two more, learned in the first paired live campaign: **reconcile every
+shipped scaffold artifact against the policy you declare** — the
+canonical instance is the reviews INDEX: current template pins ship it
+header-only, but if you project from an older pin, delete the
+template's `M000` placeholder row before declaring the no-ledger index
+mode, or the oracle's row tripwire fires at every pass boundary and
+the anomalous row's milestone key can end up in a holistic finding
+list. And **re-verify tool identities at init, never trust them**: the
+three isolated environments, the BOM-free bindings, and the provider
+CLI logins.
 
 ## 4. Writing the roadmap (milestones made of slices)
 
@@ -94,8 +112,8 @@ Released frutlups uses two plain-Markdown roadmap files as one strict,
 parseable contract. The **active roadmap** carries the milestone inventory
 and statuses. The sibling **development roadmap** carries the `Slices:`
 bullet breakdown that lets frutlups derive the slice frontier. Do not collapse
-the pair into one file: released frutlups (0.1.2 and 0.1.3 alike) does not
-derive a planning frontier from that single-file shape. Since frutlups
+the pair into one file: released frutlups (0.1.4 through 0.1.8) does not derive
+a planning frontier from that single-file shape. Since frutlups
 0.1.3, generated coding and review prompts are project-derived: the
 frontier milestone's authored Objective, Non-goals, and Verification
 fields flow into the prompt, identities are project-neutral, and the
@@ -126,6 +144,47 @@ edit is needed at those boundaries. At roadmap completion the drive freezes
 the pass boundary and runs holistic reviewer passes until two consecutive
 clean passes close the run.
 
+When a holistic pass reports findings, drive keeps that exact bounded
+slice worklist in its journal. Since drive 0.4.0 the finding ids are
+first validated against the run's own accepted-slice journal history:
+the valid subset proceeds in reported order, every unmappable id is
+journaled as a typed `holistic_finding_unmappable` fact (never
+silently dropped), and a worklist with findings but no reopenable
+slice id stops governed as `holistic_findings_unmappable` with the
+ids preserved in the escalation for you to adjudicate. At the
+otherwise terminal `complete` / `no_frontier` observation, drive
+invokes released frutlups' `declare-rework` verb with the journaled
+`holistic_pass_NNN` identity and exactly the still-missing slices. The
+transaction is the same governed shape as the other writes: dry run,
+contained target validation under
+`05_governance/rework_declarations/`, append-only real write, effect
+fence, and fresh status. Drive never reads or parses the declaration
+file. Frutlups canonicalizes multiple slices to roadmap order and gives
+each one a disjoint coding/review prompt window.
+
+The reopened slice then follows the ordinary loop: fresh coding prompt,
+coder self-report and verification, fresh review prompt, independent
+review, and a passing `record-verdict` transaction. Only that accepted
+fresh chain drains the slice from the worklist; an attempted rework or
+historical verdict does not. A `needs_work` verdict produces another
+fresh corrective prompt and review inside the existing caps.
+
+Two review-file conventions, enforced end to end since frutlups 0.1.8
+and the matching template pin, exist because a live campaign died
+without them: **a review report file carries exactly one `## Verdict`
+section** — released frutlups refuses a multi-verdict file
+("refusing to resolve an ambiguous verdict") instead of silently
+taking the first — and **corrective rounds are round-qualified**:
+generated corrective prompts declare `_round_{NNN}` zero-padded paths
+(a literal unpadded `_round2` is misread as round 1), seats write
+exactly the declared paths, and the artifact watch honestly refuses
+anything else. The
+outside-the-worklist guard still stops any unexpected frontier. If the
+process crashes after declaration, resume reconciles the durable pending
+witness or observes the already-ready worklist and continues without a
+second declaration. A new non-clean holistic pass uses its new pass
+number and therefore a new append-only declaration.
+
 If a slice is deliberately under-specified, planning reports
 needs-specification and the **architect seat** gets exactly one guarded
 turn to propose a completed roadmap — the N04 writer publishes it only
@@ -137,10 +196,18 @@ structure is authoritative even where it looks odd; proposals that
 ## 5. Declaring the policy — seats, budgets, boundaries
 
 The drive policy lives at the driven project root in
-frutlups_drive.toml. The v1 closure campaign's real policy, annotated:
+frutlups_drive.toml. A current-shape policy (the v1 closure campaign's
+real declarations plus the version 3 additions), annotated:
 
 ```toml
 schema_version = "frutlups_drive_policy_v1"
+index_mode = "no-ledger"       # or "human-ledger" (the default when absent):
+                               # in no-ledger, NOBODY keeps the reviews INDEX -
+                               # it stays at its shipped header-only state, the
+                               # manifest is the routing truth, and the oracle
+                               # treats any data row that appears as a tamper
+                               # tripwire. Declare no-ledger for fully
+                               # autonomous projects, at project init.
 
 [target]
 stop_at = "roadmap_complete"   # or "slice_complete" for one-slice runs
@@ -151,16 +218,24 @@ max_passes = 3                 # holistic pass budget
 adapter = "claude_cli"         # which CLI drives this seat
 model = "claude-opus-5"        # exact pinned identifier, never an alias
 workspace_access = "workspace_write"
+corrective_effort = "xhigh"    # optional: effort for corrective rounds, ONE
+                               # rung above the seat default, from the
+                               # fail-closed per-provider catalog fixed at
+                               # init (top tiers stay excluded)
 
 [roles.coder]
 adapter = "codex_cli"
 model = "gpt-5.6-sol"
 workspace_access = "workspace_write"
+corrective_effort = "high"     # coder default is medium; correctives run high
 
 [roles.reviewer]
 adapter = "kimi_cli"
 model = "kimi-code/k3"
 workspace_access = "read_only" # reviewers publish reports, not code
+                               # no corrective_effort: this CLI cannot switch
+                               # effort per dispatch, so the seat declares
+                               # nothing - fail-closed, never a crash
 
 [roles.shadow_reviewer]
 enabled = false                # off in v1 closure; proven inert
@@ -229,15 +304,30 @@ Nothing external dispatches without a **ready** committed gate:
 `06_infra/live_validation_gate.md` declares, in fenced TOML, the
 approval state, an approval reference (the owner note that ruled it),
 all three seats, dollar and time limits, credential environment names,
-rollback and kill-switch statements, and stop conditions. The drive
+rollback and kill-switch statements, and stop conditions. Since the
+version 3 corrective-effort schedule, the gate also declares the
+corrective efforts, and they must match the policy's declarations
+byte-identically (the extended gate equality). The drive
 assesses it at launch; any unknown field, missing approval, seat
 mismatch with the policy, or malformed value refuses with
 `live_authority_missing` and nothing is created, spawned, or spent.
 
-Treat the gate as the contract it is: one ruling, one campaign scope.
-When seats, limits, or scope change, write a new owner note and
-re-declare. (Every v1 campaign consumed its authority exactly this
-way — notes 017 through 021.)
+The gate location is resolved from the drive package: three package
+parents above the `frutlups_drive.cli` module, then
+`06_infra/live_validation_gate.md`. In a source checkout this is the
+repository root; for a wheel installed in a virtual environment it is
+the environment root. Before `run`, stage the approved gate declaration
+at that resolved location. If the file is absent, admission refuses
+`live_authority_missing (gate_file_missing)` before a run store is
+created or anything is spawned or spent.
+
+Treat the gate as the contract it is: one owner ruling, one campaign
+scope. Staging means copying that approved declaration byte-for-byte,
+not writing a deployment-specific replacement. Never re-declare it just
+because the deployment form or install root changed. When seats, limits,
+or scope change, obtain a new owner ruling and approve a new declaration.
+(Every v1 campaign consumed its authority exactly this way — notes 017
+through 021.)
 
 ## 8. Memory (optional, llloom)
 
@@ -256,6 +346,23 @@ released frutlups memory-mode contract — drive never guesses):
   journaled refusal facts, never a changed loop decision. Mode-none and
   empty-llloom runs are proven transition-identical.
 
+For a POPULATED root (the recall path, proven live in the AL-002
+paired campaign):
+
+- Author the root before launch through llloom's own released verbs
+  from a seed manifest of locator-anchored claims. Two traps learned
+  live: pages need their commentary pairs (a page without them crashes
+  `seed apply` at render and leaves a dead-owner lock — recover with
+  llloom's own `unlock --dead-owner`, never by hand-editing the root),
+  and excerpt equality is byte-strict.
+- Boundary update submissions are proposals into the llloom review
+  queue; nothing is ever applied to the root by a machine — applying
+  updates remains a human or architect decision.
+- Set expectations honestly: measured live against a memoryless twin,
+  populated memory bought judgment quality (an earlier, sharper
+  holistic catch), not per-slice speed, and well-behaved seats verify
+  recalled facts against the repository before acting on them.
+
 ## 9. Running
 
 All commands run with the drive environment's interpreter, from
@@ -269,6 +376,37 @@ python -m frutlups_drive resume <project> <run_id> [--until ...]
 python -m frutlups_drive stop   <project>
 python -m frutlups_drive report <project> <run_id> [--json]
 ```
+
+Every `run` and `resume` requires the project-local
+`.frutlups_drive_mock/script.json`, including runs whose seats are live.
+The name is historical: in a live project the script supplies
+the immutable per-invocation verification plan, while its `planstate`,
+`verbs`, and `executors` entries remain empty. If the file is absent,
+admission refuses `mock_script_missing` before any run effect.
+
+A minimal live-mode script uses the drive interpreter for the product
+test lane, the project root as its working directory, and a bounded
+timeout:
+
+```json
+{
+  "planstate": [],
+  "verbs": {},
+  "executors": {},
+  "verification": {
+    "commands": [
+      {
+        "argv": ["{python}", "-m", "unittest", "discover", "-s", "08_pkg/tests"],
+        "cwd": ".",
+        "timeout_seconds": 120
+      }
+    ],
+    "declared_regenerated": []
+  }
+}
+```
+
+The script is mandatory; only the mock rehearsal is optional.
 
 A sensible first session on a fresh project:
 
@@ -315,6 +453,30 @@ Everything observable lives in the run store, inside the project's
   generated prompts, review reports, verdict records, roadmap edits.
   Anything else appearing there is a finding.
 
+**Launch practice for long autonomous runs** (the campaign pattern):
+launch `run` detached from any interactive session that might kill it,
+and supervise by tailing the journal — never by attaching to the
+process.
+
+**Journal surfaces added in versions 3-4**, so you recognize them live:
+
+- `watch_timeout` + an effort-escalated redispatch: a seat that
+  "completes" without delivering its declared artifacts is honestly
+  waited out for the full watch ceiling, journaled, and re-dispatched
+  once at the corrective effort — self-recovery, not a stop. Every
+  corrective dispatch journals its `effort`.
+- A `ladder_round3` escalation now carries the mandatory three-exit
+  reassessment fork (defect plane / prompt-contract plane /
+  evidence-documentation plane) — classify before any resume.
+- `holistic_finding_unmappable` events and the
+  `holistic_findings_unmappable` stop (section 4): unroutable holistic
+  finding ids, journaled and escalated instead of poisoning the rework
+  declaration.
+- The no-ledger pass-boundary oracle bundle is QUIET: zero
+  observations is the healthy baseline, and the observation class you
+  will most likely ever see is the `ledger_row_in_no_ledger_project`
+  tripwire — a data row in an INDEX nobody should be keeping.
+
 **The kill switch**: `stop <project>` writes a STOP sentinel; the
 supervisor halts at the next safe point (including mid-backoff) with a
 governed stop. Removing the sentinel is a human decision.
@@ -326,6 +488,59 @@ explicit authority. A resume consumes the durable pending witness,
 resets only the failure streaks (a human adjudicated; every monotone
 budget still counts), and continues the same run. Resumes are precious:
 v1 practice is one per ruling.
+
+### Governed filing protocol (stopped runs only)
+
+Use this protocol only when a run is already STOPPED, its recovery requires
+placing an existing seat-authored artifact at the path declared by the
+governing prompt or planning state, and a human ruling authorizes that exact
+filing. The two precedent classes are (1) filing a blocked review report aside
+under its round-qualified name before the next review round, as authorized by
+owner note 031 and disclosed in the second-pass campaign ledger, and (2)
+filing a genuine rework self-report from the wrong canonical path to its
+prompt-declared disjoint-window path, as authorized by owner note 034 and
+disclosed in the rerun ledger with an identical SHA-256 before and after.
+See `05_governance/human_owner_notes/031_2026-08-17_campaign_stop2_seat_visible_interpreter_guidance.md`,
+`03_experiments/second_pass_acceptance_campaign_record.md` (ledger L5),
+`05_governance/human_owner_notes/034_2026-08-19_campaign_rerun_stop1_file_and_resume_ruled.md`,
+and `03_experiments/m006_s03_acceptance_rerun_campaign_record.md`
+(ledger L3).
+
+It does **not** authorize editing content, merging or synthesizing an artifact,
+touching accepted history, or filing while the run is live. Never perform it
+during an active watch or anywhere between dispatch and collection. The
+note-031 recovery preserved both blocked reports byte-exact under distinct
+round-qualified names; the note-034 recovery disclosed that the accepted
+round-1 self-report had already been overwritten and unrecoverable, rather
+than treating filing as authority to repair that lost history.
+
+After the stop and ruling:
+
+1. Record the authorizing ruling and identify the exact source and declared
+   destination paths. Refuse the operation if the destination is accepted
+   history or already contains different bytes.
+2. Read the source without changing it and compute its SHA-256. Do not edit,
+   normalize, concatenate, or regenerate any byte.
+3. Copy the bytes to the destination — never move-and-edit — and preserve the
+   source bytes where the seat wrote them or in the attempt's byte-exact
+   snapshot.
+4. Compute the destination SHA-256 and compare it with the source hash. A
+   mismatch is not a filing; leave the run stopped and seek a new ruling.
+5. In the campaign's intervention ledger, record the source path, destination
+   path, identical SHA-256, filing timestamp, authorizing ruling, and the fact
+   that a human performed the copy. Resume only after this entry exists.
+
+The disclosure-plus-hash trail is the authorship boundary: it proves that the
+operator placed already-authored seat bytes instead of authoring replacement
+content. An operator who omits that record has performed the unauthorized
+artifact write identified by F9/F15, not a governed recovery.
+
+Mechanism assessment — **DEFERRED candidate `governed-refile`**: a future
+human-invoked command would need to enforce the stopped-run copy, dual-hash,
+source-preservation, and journal-evidence contract above, but the existing
+`adoption` event honestly means incorporation of verified coder-attempt
+evidence from a prior run, not a workspace filing, and this slice forbids the
+new event kind required to journal re-filing without overloading that meaning.
 
 **Golden rules**: never edit the run store or a capture; never
 sanitize a transcript; never retry past a cap; never let anything but
