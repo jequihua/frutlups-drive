@@ -48,11 +48,144 @@ PHASE_B_POLICY = (
 NO_LEDGER_POLICY = 'index_mode = "no-ledger"\n' + PHASE_B_POLICY
 
 
+class _ReworkRecordingWriter:
+    def __init__(self, project_root):
+        self._root = Path(project_root)
+        self.calls = []
+
+    def invoke(
+        self,
+        verb,
+        declared_path,
+        review_report=None,
+        *,
+        slice_id=None,
+        pass_id=None,
+        rework_slices=(),
+    ):
+        self.calls.append(
+            {
+                "verb": verb,
+                "declared_path": declared_path,
+                "review_report": review_report,
+                "slice_id": slice_id,
+                "pass_id": pass_id,
+                "rework_slices": rework_slices,
+            }
+        )
+        target = self._root / "prompts/for_coding_agent/999_test_rework.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("# governed rework\n", encoding="utf-8")
+        return target
+
+
 class PhaseBLoopTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
+
+    @staticmethod
+    def _record_acceptances(scenario, *slice_ids):
+        for slice_id in slice_ids:
+            scenario.supervisor._journal(
+                "verb",
+                verb="record-verdict",
+                artifact=f"05_governance/reviews/{slice_id}_verdict.md",
+                slice=slice_id,
+            )
+
+    def _declaration_scenario(self, findings, *reopenable):
+        scenario = Scenario(
+            self.root,
+            states=[complete_state(), complete_state(), complete_state()],
+            reviewer=[holistic(findings)],
+            policy_body=PHASE_B_POLICY,
+        )
+        writer = _ReworkRecordingWriter(scenario.project)
+        scenario.supervisor._verb_writer = writer
+        scenario.supervisor._verb_supports_rework = True
+        self._record_acceptances(scenario, *reopenable)
+        self.assertEqual(scenario.supervisor.tick().detail, "pass_boundary")
+        self.assertEqual(
+            scenario.supervisor.tick().detail, "second_pass_worklist"
+        )
+        return scenario, writer
+
+    def test_mixed_findings_declare_valid_subset_and_journal_each_unmappable(self):
+        scenario, writer = self._declaration_scenario(
+            ["M000", "M001-S01", "M999", "M001-S02"],
+            "M001-S01",
+            "M001-S02",
+        )
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual((result.kind, result.detail), ("acted", "verb:declare-rework"))
+        self.assertEqual(len(writer.calls), 1)
+        self.assertEqual(writer.calls[0]["verb"], "declare-rework")
+        self.assertEqual(writer.calls[0]["pass_id"], "holistic_pass_001")
+        self.assertEqual(
+            writer.calls[0]["rework_slices"], ("M001-S01", "M001-S02")
+        )
+        unmappable = [
+            event
+            for event in scenario.events()
+            if event["kind"] == "holistic_finding_unmappable"
+        ]
+        self.assertEqual(
+            [
+                (event["pass_id"], event["finding_id"], event["progress"])
+                for event in unmappable
+            ],
+            [
+                ("holistic_pass_001", "M000", False),
+                ("holistic_pass_001", "M999", False),
+            ],
+        )
+
+    def test_all_invalid_findings_stop_governed_without_verb_attempt(self):
+        scenario, writer = self._declaration_scenario(["M000", "M999"])
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual(result.stop_reason, StopReason.HOLISTIC_FINDINGS_UNMAPPABLE)
+        self.assertEqual(writer.calls, [])
+        escalation = result.escalation_path.read_text(encoding="utf-8")
+        self.assertIn('stop_reason = "holistic_findings_unmappable"', escalation)
+        self.assertIn("holistic_pass_001", escalation)
+        self.assertIn("M000", escalation)
+        self.assertIn("M999", escalation)
+
+    def test_all_valid_findings_keep_declaration_behavior_unchanged(self):
+        scenario, writer = self._declaration_scenario(
+            ["M001-S02", "M001-S01"], "M001-S01", "M001-S02"
+        )
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual((result.kind, result.detail), ("acted", "verb:declare-rework"))
+        self.assertEqual(len(writer.calls), 1)
+        self.assertEqual(
+            writer.calls[0]["rework_slices"], ("M001-S02", "M001-S01")
+        )
+        self.assertFalse(
+            any(
+                event["kind"] == "holistic_finding_unmappable"
+                for event in scenario.events()
+            )
+        )
+
+    def test_duplicate_valid_findings_collapse_before_declaration(self):
+        scenario, writer = self._declaration_scenario(
+            ["M001-S01", "M001-S01"], "M001-S01"
+        )
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual((result.kind, result.detail), ("acted", "verb:declare-rework"))
+        self.assertEqual(len(writer.calls), 1)
+        self.assertEqual(writer.calls[0]["rework_slices"], ("M001-S01",))
 
     def test_freeze_findings_worklist_and_two_consecutive_clean_closure(self):
         states = [
@@ -75,6 +208,7 @@ class PhaseBLoopTests(unittest.TestCase):
             boundary="roadmap_complete",
             policy_body=PHASE_B_POLICY,
         )
+        self._record_acceptances(scenario, "M001-S01")
         first = scenario.supervisor.tick()
         self.assertEqual(first.detail, "pass_boundary")
         boundary_path = scenario.store.run_dir("run_001") / "pass_boundary.json"
@@ -260,6 +394,7 @@ class PhaseBLoopTests(unittest.TestCase):
             reviewer=[holistic(["M001-S01"])],
             policy_body=PHASE_B_POLICY,
         )
+        self._record_acceptances(scenario, "M001-S01")
         scenario.supervisor.tick()
         scenario.supervisor.tick()
         result = scenario.supervisor.tick()
@@ -272,6 +407,7 @@ class PhaseBLoopTests(unittest.TestCase):
             reviewer=[holistic(["M001-S01"])],
             policy_body=PHASE_B_POLICY,
         )
+        self._record_acceptances(scenario, "M001-S01")
         scenario.supervisor.tick()
         scenario.supervisor.tick()
         self.assertEqual(

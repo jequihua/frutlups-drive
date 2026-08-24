@@ -115,6 +115,7 @@ EVENT_KINDS = (
     "pass_boundary",
     "pass_oracle",
     "holistic_review",
+    "holistic_finding_unmappable",
     "shadow_review",
     "memory_hook",
     "slice_complete",
@@ -1385,6 +1386,14 @@ class Supervisor:
         )
 
     def _complete_pass(self, state: PlanningState) -> TickResult:
+        validated = self._validated_active_worklist()
+        if validated is not None:
+            _, pass_number, valid, unmappable = validated
+            self._journal_unmappable_findings(pass_number, unmappable)
+            if unmappable and not valid:
+                return self._unmappable_findings_stop(
+                    state, pass_number, unmappable
+                )
         missing = self._missing_worklist_slices()
         if missing:
             active = self._active_worklist()
@@ -1776,10 +1785,10 @@ class Supervisor:
         return None
 
     def _missing_worklist_slices(self) -> tuple[str, ...]:
-        active = self._active_worklist()
-        if active is None:
+        validated = self._validated_active_worklist()
+        if validated is None:
             return ()
-        index, _, findings = active
+        index, _, findings, _ = validated
         completed = {
             str(event.get("slice"))
             for event in self._events[index + 1 :]
@@ -1794,10 +1803,15 @@ class Supervisor:
         return tuple(item for item in findings if item not in completed)
 
     def _check_active_worklist(self, state: PlanningState) -> TickResult | None:
-        active = self._active_worklist()
-        if active is None:
+        validated = self._validated_active_worklist()
+        if validated is None:
             return None
-        _, _, findings = active
+        _, pass_number, findings, unmappable = validated
+        self._journal_unmappable_findings(pass_number, unmappable)
+        if unmappable and not findings:
+            return self._unmappable_findings_stop(
+                state, pass_number, unmappable
+            )
         slice_id = state.frontier.slice_id if state.frontier else ""
         if slice_id not in findings:
             return self._stop(
@@ -1807,6 +1821,79 @@ class Supervisor:
                 slice_id=slice_id,
             )
         return None
+
+    def _validated_active_worklist(
+        self,
+    ) -> tuple[int, int, tuple[str, ...], tuple[str, ...]] | None:
+        active = self._active_worklist()
+        if active is None:
+            return None
+        index, pass_number, findings = active
+        reopenable = {
+            str(event.get("slice"))
+            for event in self._events[:index]
+            if (
+                event.get("kind") == "slice_complete"
+                or (
+                    event.get("kind") == "verb"
+                    and event.get("verb") == "record-verdict"
+                )
+            )
+            and isinstance(event.get("slice"), str)
+            and bool(event.get("slice"))
+        }
+        valid: list[str] = []
+        unmappable: list[str] = []
+        seen_valid: set[str] = set()
+        seen_unmappable: set[str] = set()
+        for finding_id in findings:
+            if finding_id in reopenable:
+                if finding_id not in seen_valid:
+                    valid.append(finding_id)
+                    seen_valid.add(finding_id)
+            elif finding_id not in seen_unmappable:
+                unmappable.append(finding_id)
+                seen_unmappable.add(finding_id)
+        return index, pass_number, tuple(valid), tuple(unmappable)
+
+    def _journal_unmappable_findings(
+        self, pass_number: int, finding_ids: tuple[str, ...]
+    ) -> None:
+        pass_id = f"holistic_pass_{pass_number:03d}"
+        journaled = {
+            (event.get("pass_id"), event.get("finding_id"))
+            for event in self._events
+            if event.get("kind") == "holistic_finding_unmappable"
+        }
+        for finding_id in finding_ids:
+            key = (pass_id, finding_id)
+            if key in journaled:
+                continue
+            self._journal(
+                "holistic_finding_unmappable",
+                pass_id=pass_id,
+                finding_id=finding_id,
+                progress=False,
+            )
+            journaled.add(key)
+
+    def _unmappable_findings_stop(
+        self,
+        state: PlanningState,
+        pass_number: int,
+        finding_ids: tuple[str, ...],
+    ) -> TickResult:
+        pass_id = f"holistic_pass_{pass_number:03d}"
+        listed = ", ".join(f"`{finding_id}`" for finding_id in finding_ids)
+        return self._stop(
+            StopReason.HOLISTIC_FINDINGS_UNMAPPABLE,
+            f"{pass_id} has findings but no reopenable slice ids",
+            state=state,
+            decision=(
+                f"Human adjudication is required for {pass_id}. Its "
+                f"unmappable finding ids, in reported order, are: {listed}."
+            ),
+        )
 
     def _owner_notes_snapshot(self) -> dict[str, object]:
         directory = self._project_root / _OWNER_NOTES_RELATIVE
@@ -3516,8 +3603,8 @@ def _checked_findings(payload: object, maximum: int) -> list[str]:
     if any(
         not isinstance(item, str) or not _SLICE_ID.fullmatch(item)
         for item in findings
-    ) or len(set(findings)) != len(findings):
-        raise ValueError("holistic findings are not unique slice identifiers")
+    ):
+        raise ValueError("holistic findings are not bounded identifiers")
     return list(findings)
 
 

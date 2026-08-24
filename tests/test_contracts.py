@@ -123,6 +123,10 @@ class EnumContractTests(unittest.TestCase):
                 ("OWNER_NOTE", "owner_note"),
                 ("CONTRACT_VERSION_REFUSED", "contract_version_refused"),
                 ("HUMAN_GATE", "human_gate"),
+                (
+                    "HOLISTIC_FINDINGS_UNMAPPABLE",
+                    "holistic_findings_unmappable",
+                ),
             ],
         )
 

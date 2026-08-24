@@ -237,10 +237,22 @@ class RepairFamilyTests(E2EBase):
             reviewers = script["executors"]["reviewer"]
             first = json.loads(json.dumps(reviewers[0]))
             first["writes"][0]["content_file"] = "agent/review_needs_work.md"
+            # Released frutlups 0.1.8 declares round-qualified output
+            # paths for ordinary corrective rounds (the `_round_{N:03d}`
+            # family, Q010); the corrective seats write where the
+            # generated prompts point them.
             second = json.loads(json.dumps(reviewers[0]))
+            second["writes"][0]["path"] = (
+                "05_governance/reviews/"
+                "m001_s02_alpha_work_round_002_review_report.md"
+            )
             script["executors"]["reviewer"] = [first, second, reviewers[1]]
             coders = script["executors"]["coder"]
             repair = json.loads(json.dumps(coders[0]))
+            repair["writes"][0]["path"] = (
+                "05_governance/reviews/"
+                "m001_s02_alpha_work_round_002_self_report.md"
+            )
             script["executors"]["coder"] = [coders[0], repair, coders[1]]
 
         self.edit_script(project, mutate)
@@ -272,10 +284,11 @@ class RepairFamilyTests(E2EBase):
         self.assertEqual(
             records,
             [
-                "m001_s02_alpha_work_verdict_record.md",
+                "m001_s02_alpha_work_round_002_verdict_record.md",
                 "m001_s03_beta_work_verdict_record.md",
             ],
-            "exactly one record per slice; no needs_work record exists",
+            "exactly one record per slice; the corrective acceptance is "
+            "round-qualified under 0.1.8; no needs_work record exists",
         )
         coder_dispatches = [
             e for e in events

@@ -465,6 +465,12 @@ class EnduranceScenarioTests(unittest.TestCase):
             boundary="roadmap_complete",
             policy_body=phase_b_policy,
         )
+        scenario.supervisor._journal(
+            "verb",
+            verb="record-verdict",
+            artifact="05_governance/reviews/m001_s01_accepted_verdict.md",
+            slice="M001-S01",
+        )
         result = scenario.supervisor.run_until()
         self.assertEqual((result.kind, result.detail), ("boundary", "complete"))
         self.assertEqual(

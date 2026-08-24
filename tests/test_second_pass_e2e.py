@@ -31,6 +31,7 @@ from frutlups_drive.contracts import (
     ExitCode,
     LoopStep,
     PlanOutcome,
+    StopReason,
 )
 from frutlups_drive.frutlupscli import BINDING_SCHEMA_VERSION, load_launch_binding
 from frutlups_drive.planstate import Frontier
@@ -485,7 +486,11 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         self, review_prompt: str = LIVE_SHAPE_REWORK_REVIEW_PROMPT
     ):
         project = self._live_shape_project()
-        supervisor, store = self._supervisor(project, ("M002-S01",))
+        supervisor, store = self._supervisor(
+            project,
+            ("M002-S01",),
+            accepted_slices=("M002-S01",),
+        )
 
         # The tiny fixture has no historical v2 prompt template.  Materialize
         # the frozen campaign's metadata after the real governed write so all
@@ -516,6 +521,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
                 event.get("kind") == "verb"
                 and event.get("verb") == "record-verdict"
                 and event.get("slice") == "M002-S01"
+                and event.get("fixture_prior_acceptance") is not True
                 for event in events
             ):
                 return events
@@ -528,6 +534,11 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         *,
         needs_work_first: bool = False,
         second_findings: tuple[str, ...] = (),
+        accepted_slices: tuple[str, ...] = (
+            "M001-S01",
+            "M001-S02",
+            "M001-S03",
+        ),
     ):
         policy_path = project / "frutlups_drive.toml"
         policy = load_execution_policy(policy_path).policy
@@ -554,6 +565,21 @@ class SecondPassRealPlanningTests(unittest.TestCase):
                     "boundary": "roadmap_complete",
                 },
             )
+            for slice_id in accepted_slices:
+                store.append_event(
+                    "run_001",
+                    {
+                        "kind": "verb",
+                        "t": time.time(),
+                        "verb": "record-verdict",
+                        "artifact": (
+                            "05_governance/reviews/"
+                            f"{slice_id.lower()}_accepted_verdict.md"
+                        ),
+                        "slice": slice_id,
+                        "fixture_prior_acceptance": True,
+                    },
+                )
         supervisor = _build_supervisor(
             project,
             store,
@@ -574,6 +600,71 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         supervisor._executors["coder"] = executor
         supervisor._executors["reviewer"] = executor
         return supervisor, store
+
+    def test_mixed_finding_ids_repair_valid_subset_and_reach_two_clean(self):
+        project = self._project("mixed_ids")
+        supervisor, store = self._supervisor(
+            project, ("M000", "M001-S02", "M999")
+        )
+
+        result = supervisor.run_until()
+
+        self.assertEqual((result.kind, result.detail), ("boundary", "complete"))
+        events = store.read_events("run_001")
+        declaration = [
+            event
+            for event in events
+            if event.get("kind") == "verb"
+            and event.get("verb") == "declare-rework"
+        ]
+        self.assertEqual(len(declaration), 1)
+        self.assertEqual(declaration[0]["slices"], ["M001-S02"])
+        unmappable = [
+            event
+            for event in events
+            if event.get("kind") == "holistic_finding_unmappable"
+        ]
+        self.assertEqual(
+            [event["finding_id"] for event in unmappable], ["M000", "M999"]
+        )
+
+    def test_all_invalid_finding_ids_stop_before_real_verb_transaction(self):
+        project = self._project("all_invalid_ids")
+        supervisor, store = self._supervisor(project, ("M000", "M999"))
+        original_invoke = supervisor._verb_writer.invoke
+        calls = []
+
+        def recording_invoke(*args, **kwargs):
+            calls.append((args, kwargs))
+            return original_invoke(*args, **kwargs)
+
+        supervisor._verb_writer.invoke = recording_invoke
+
+        result = supervisor.run_until()
+
+        self.assertEqual(result.stop_reason, StopReason.HOLISTIC_FINDINGS_UNMAPPABLE)
+        self.assertEqual(calls, [])
+        self.assertFalse(
+            (store.run_dir("run_001") / "pending_verb.json").exists()
+        )
+
+    def test_duplicate_valid_finding_id_declares_once(self):
+        project = self._project("duplicate_ids")
+        supervisor, store = self._supervisor(
+            project, ("M001-S02", "M001-S02")
+        )
+
+        result = supervisor.run_until()
+
+        self.assertEqual((result.kind, result.detail), ("boundary", "complete"))
+        declaration = [
+            event
+            for event in store.read_events("run_001")
+            if event.get("kind") == "verb"
+            and event.get("verb") == "declare-rework"
+        ]
+        self.assertEqual(len(declaration), 1)
+        self.assertEqual(declaration[0]["slices"], ["M001-S02"])
 
     def test_single_slice_rework_reaches_two_clean(self):
         project = self._project("single")
@@ -674,6 +765,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         self.assertFalse(
             any(
                 event.get("kind") == "verb" and event.get("verb") == "record-verdict"
+                and event.get("fixture_prior_acceptance") is not True
                 for event in events
             )
         )
@@ -838,7 +930,12 @@ class SecondPassRealPlanningTests(unittest.TestCase):
             store.read_events("run_001"),
         )
         events = store.read_events("run_001")
-        verbs = [event["verb"] for event in events if event["kind"] == "verb"]
+        verbs = [
+            event["verb"]
+            for event in events
+            if event["kind"] == "verb"
+            and event.get("fixture_prior_acceptance") is not True
+        ]
         self.assertEqual(verbs.count("declare-rework"), 1)
         self.assertEqual(verbs.count("make-coding-prompt"), 2)
         self.assertEqual(verbs.count("make-review-prompt"), 2)

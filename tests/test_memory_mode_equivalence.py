@@ -227,6 +227,16 @@ class MemoryModeEquivalenceTests(unittest.TestCase):
                 memory_hooks_factory=factory,
                 **kwargs_factory(),
             )
+            if case in ("second_pass", "completion-boundary"):
+                scenario.supervisor._journal(
+                    "verb",
+                    verb="record-verdict",
+                    artifact=(
+                        "05_governance/reviews/"
+                        "m001_s01_accepted_verdict.md"
+                    ),
+                    slice="M001-S01",
+                )
             scenario.supervisor.memory_preflight()
             result = scenario.supervisor.run_until()
             memory_after = tree_identity(memory)
