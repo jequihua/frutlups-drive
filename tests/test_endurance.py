@@ -405,7 +405,8 @@ class EnduranceScenarioTests(unittest.TestCase):
         notes.mkdir(parents=True, exist_ok=True)
         (notes / "new_note.md").write_bytes(b"uninterpreted owner prose\n")
         self.assertEqual(
-            owner.supervisor.tick().stop_reason, StopReason.OWNER_NOTE
+            owner.supervisor.tick().stop_reason,
+            StopReason.FRESH_RUN_REQUIRED,
         )
 
     def test_phase_b_reconciliation_freeze_worklist_and_two_clean_endures(self):

@@ -75,6 +75,7 @@ class RunStoreRefusal(Exception):
 _ATTEMPT_PROMPT_NAMES = (
     "repair_prompt.md",
     "reconciliation_prompt.md",
+    "architect_corrective_prompt.md",
     "holistic_prompt.md",
     "shadow_prompt.md",
     "memory_prompt.md",
@@ -1139,6 +1140,11 @@ def _result_payload(result: AgentRunResult) -> dict[str, object]:
         "tokens_in": result.tokens_in,
         "tokens_out": result.tokens_out,
         "cost_usd": result.cost_usd,
+        "provider_duration_seconds": result.provider_duration_seconds,
+        "observed_duration_seconds": result.observed_duration_seconds,
+        "retry_class": result.retry_class,
+        "cost_knowledge": result.cost_knowledge,
+        "capture_truncated": result.capture_truncated,
     }
 
 

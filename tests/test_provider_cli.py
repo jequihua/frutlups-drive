@@ -89,6 +89,18 @@ class FailingRunner:
         raise OSError("simulated spawn failure")
 
 
+class UsageRunner(CapturingRunner):
+    def run(self, argv, cwd, env, timeout_seconds, stdout_path, stderr_path,
+            max_stream_bytes=1_048_576, stdin_bytes=None):
+        self.calls.append((tuple(argv), Path(cwd), dict(env), timeout_seconds))
+        self.stdin_bytes.append(stdin_bytes)
+        Path(stdout_path).write_bytes(
+            b'{"event":"result","usage":{"input_tokens":123,"output_tokens":45},"duration_ms":2500}\n'
+        )
+        Path(stderr_path).write_bytes(b"")
+        return ProcessOutcome(0.0, 3.0, 0, False)
+
+
 class ProviderBindingCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -362,6 +374,30 @@ class BindingLoaderTests(ProviderBindingCase):
         self.assertEqual(dict(self.runtime().child_env)["PYTHONDONTWRITEBYTECODE"], "1")
         self.assertNotIn("PATH", names)
 
+    def test_declared_non_secret_binding_is_injected_and_manifested_by_hash(self):
+        declaration = replace(
+            gate_declaration(),
+            runtime_environment_bindings=(
+                ("JAVA_TOOL_OPTIONS", "-Djava.io.tmpdir=.tmp"),
+            ),
+        )
+        runtime = self.runtime(declaration=declaration)
+        self.assertEqual(
+            dict(runtime.child_env)["JAVA_TOOL_OPTIONS"],
+            "-Djava.io.tmpdir=.tmp",
+        )
+        facts = runtime.manifest_facts()
+        self.assertEqual(
+            facts["runtime_environment_binding_001_name"], "JAVA_TOOL_OPTIONS"
+        )
+        self.assertEqual(
+            facts["runtime_environment_binding_001_value_sha256"],
+            hashlib.sha256(b"-Djava.io.tmpdir=.tmp").hexdigest(),
+        )
+        serialized = json.dumps(facts, sort_keys=True)
+        self.assertNotIn("-Djava.io.tmpdir=.tmp", serialized)
+        self.assertNotIn("user", serialized)
+
 
 class CommandConstructionTests(ProviderBindingCase):
     def execute(self, role):
@@ -405,7 +441,8 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertEqual(runner.stdin_bytes, [b"Do the bounded fixture task."])
         self.assertEqual(timeout, 5.0)
         self.assertNotIn("PATH", env)
-        self.assertEqual(result.cost_usd, 0.0)
+        self.assertIsNone(result.cost_usd)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
 
     def test_codex_corrective_command_changes_exactly_the_effort_token(self):
         runner = CapturingRunner()
@@ -435,7 +472,8 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertNotIn("--effort", argv)
         self.assertEqual(runner.stdin_bytes, [None])
         self.assertEqual(env["PYTHONDONTWRITEBYTECODE"], "1")
-        self.assertEqual(result.cost_usd, 0.0)
+        self.assertIsNone(result.cost_usd)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
 
     def test_kimi_corrective_effort_refuses_before_spawn(self):
         runner = CapturingRunner()
@@ -523,7 +561,8 @@ class CommandConstructionTests(ProviderBindingCase):
         self.assertEqual(runner.stdin_bytes, [b"Do the bounded fixture task."])
         self.assertEqual(timeout, 5.0)
         self.assertNotIn("PATH", env)
-        self.assertEqual(result.cost_usd, 0.0)
+        self.assertIsNone(result.cost_usd)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
 
     def test_claude_corrective_command_changes_exactly_the_effort_token(self):
         runner = CapturingRunner()
@@ -555,6 +594,19 @@ class CommandConstructionTests(ProviderBindingCase):
         )
         self.assertEqual(event_lines[0]["effort"], "medium")
 
+    def test_structured_provider_usage_yields_tokens_and_reported_duration(self):
+        runner = UsageRunner()
+        executor = ProviderCliExecutor(
+            self.runtime(), "codex_cli", runner, self.root / "usage-captures"
+        )
+        result = executor.execute(self.request(Role.CODER))
+        self.assertEqual(result.tokens_in, 123)
+        self.assertEqual(result.tokens_out, 45)
+        self.assertEqual(result.provider_duration_seconds, 2.5)
+        self.assertEqual(result.observed_duration_seconds, 3.0)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
+        self.assertIsNone(result.cost_usd)
+
     def test_timeout_uses_accepted_process_tree_kill(self):
         self.stub.write_text(
             "import threading\nprint('usage summary: before timeout', flush=True)\n"
@@ -572,7 +624,8 @@ class CommandConstructionTests(ProviderBindingCase):
         result = executor.execute(self.request(Role.CODER))
         self.assertEqual(result.status, "timeout")
         self.assertEqual(result.exit_reason, "agent_timeout")
-        self.assertEqual(result.cost_usd, 0.0)
+        self.assertIsNone(result.cost_usd)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
 
     def test_captured_runner_failure_returns_subscription_cost_fact(self):
         executor = ProviderCliExecutor(
@@ -584,7 +637,8 @@ class CommandConstructionTests(ProviderBindingCase):
         result = executor.execute(self.request(Role.CODER))
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.exit_reason, "agent_runner_failure")
-        self.assertEqual(result.cost_usd, 0.0)
+        self.assertIsNone(result.cost_usd)
+        self.assertEqual(result.cost_knowledge, "subscription_prepaid")
         observations = [
             json.loads(line)
             for line in Path(result.event_log_path).read_text(

@@ -134,10 +134,13 @@ class FakeProcessRunner:
         self.calls += 1
         exit_code = self.exit_codes[index] if index < len(self.exit_codes) else 0
         timed = self.timed_out[index] if index < len(self.timed_out) else False
+        started = self._clock.now()
+        if timed:
+            self._clock.advance(timeout_seconds)
         Path(stdout_path).write_bytes(b"fake verification stdout\n")
         Path(stderr_path).write_bytes(b"")
         return ProcessOutcome(
-            self._clock.now(), self._clock.now(), None if timed else exit_code, timed
+            started, self._clock.now(), None if timed else exit_code, timed
         )
 
 
@@ -227,6 +230,7 @@ class Scenario:
         policy_body="",
         boundary="slice_complete",
         verifier_exit_codes=None,
+        verifier_timed_out=None,
         watch_timeout=5.0,
         transition_hook=None,
         event_hook=None,
@@ -262,7 +266,11 @@ class Scenario:
                 self.run_id,
                 {"kind": "run_created", "t": self.clock.now(), "boundary": boundary},
             )
-        self.runner = FakeProcessRunner(self.clock, exit_codes=verifier_exit_codes)
+        self.runner = FakeProcessRunner(
+            self.clock,
+            exit_codes=verifier_exit_codes,
+            timed_out=verifier_timed_out,
+        )
         events = self.store.read_events(self.run_id)
         plan_offset = mock_plan_offset(list(events))
         # Executor scripts advance only for attempts whose result was produced

@@ -14,6 +14,8 @@ from frutlups_drive.policy import (
 
 FULL_POLICY = """\
 schema_version = "frutlups_drive_policy_v1"
+architect_corrective_turn_enabled = false
+max_architect_corrective_turns_per_run = 1
 
 [target]
 stop_at = "milestone_complete"
@@ -90,7 +92,7 @@ max_stream_bytes = 1048576
 binding_path = "local_state/frutlups_binding.toml"
 """
 
-_FIELD_COUNT = 52
+_FIELD_COUNT = 54
 
 
 class PolicyTestCase(unittest.TestCase):
@@ -119,7 +121,10 @@ class ValidPolicyTests(PolicyTestCase):
         result = self.load(FULL_POLICY)
         policy = result.policy
         self.assertEqual(policy.schema_version, SCHEMA_VERSION)
+        self.assertFalse(policy.architect_corrective_turn_enabled)
+        self.assertEqual(policy.max_architect_corrective_turns_per_run, 1)
         self.assertEqual(policy.index_mode, "human-ledger")
+        self.assertIsNone(policy.campaign_id)
         self.assertEqual(policy.target.stop_at, "milestone_complete")
         self.assertEqual(policy.target.max_slices, 25)
         self.assertEqual(policy.target.max_passes, 3)
@@ -154,6 +159,8 @@ class ValidPolicyTests(PolicyTestCase):
         self.assertEqual(policy.limits.max_run_store_bytes, 64 * 1024 * 1024)
         self.assertEqual(policy.limits.max_retained_runs, 25)
         self.assertEqual(policy.limits.max_shadow_attempts_per_slice, 1)
+        self.assertFalse(policy.architect_corrective_turn_enabled)
+        self.assertEqual(policy.max_architect_corrective_turns_per_run, 1)
 
         self.assertFalse(policy.git.worktree_per_slice)
         self.assertEqual(policy.git.commit, "never")
@@ -178,6 +185,45 @@ class ValidPolicyTests(PolicyTestCase):
         )
         self.assertEqual(result.defaulted, ())
         self.assertEqual(result.warnings, ())
+
+    def test_campaign_id_is_optional_and_bounded(self):
+        absent = self.load(f'schema_version = "{SCHEMA_VERSION}"\n')
+        declared = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            'campaign_id = "external-eval.v5"\n'
+        )
+        self.assertIsNone(absent.policy.campaign_id)
+        self.assertNotIn("campaign_id", absent.defaulted)
+        self.assertEqual(declared.policy.campaign_id, "external-eval.v5")
+        for value in ("", "space value", "x" * 65):
+            with self.subTest(value=value):
+                self.assert_refused(
+                    f'schema_version = "{SCHEMA_VERSION}"\n'
+                    f'campaign_id = "{value}"\n',
+                    "field_value_invalid",
+                )
+
+    def test_architect_corrective_turn_enablement_and_cap_are_bounded(self):
+        enabled = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            "architect_corrective_turn_enabled = true\n"
+            "max_architect_corrective_turns_per_run = 2\n"
+        ).policy
+        self.assertTrue(enabled.architect_corrective_turn_enabled)
+        self.assertEqual(enabled.max_architect_corrective_turns_per_run, 2)
+        cases = (
+            (0, "numeric_range_invalid"),
+            (9, "numeric_range_invalid"),
+            (True, "field_type_invalid"),
+        )
+        for value, code in cases:
+            with self.subTest(value=value):
+                literal = str(value).lower() if isinstance(value, bool) else str(value)
+                self.assert_refused(
+                    f'schema_version = "{SCHEMA_VERSION}"\n'
+                    f"max_architect_corrective_turns_per_run = {literal}\n",
+                    code,
+                )
 
     def test_two_clean_pass_boundary_is_an_explicit_opt_in(self):
         result = self.load(
@@ -292,6 +338,47 @@ class ValidPolicyTests(PolicyTestCase):
         self.assertEqual(result.policy.limits.watch_poll_seconds, 0.25)
         self.assertEqual(result.policy.limits.max_run_store_bytes, 4096)
         self.assertEqual(result.policy.limits.max_retained_runs, 2)
+
+    def test_optional_dispatch_environment_and_reporting_declarations(self):
+        result = self.load(
+            f'schema_version = "{SCHEMA_VERSION}"\n'
+            'runtime_environment_bindings = [{name = "JAVA_TOOL_OPTIONS", value = "-Djava.io.tmpdir=.tmp"}]\n'
+            '[dispatch]\n'
+            'role_call_ceiling_seconds = {coder = 2400, reviewer = 900}\n'
+            'slice_call_ceiling_overrides = [{slice_id = "M009-S03", ceiling_seconds = 7200}]\n'
+            'scientific_subprocess_budget_seconds = 5400\n'
+            'capture_truncation_disposition = "tolerate"\n'
+            '[reporting]\n'
+            'currency = "EUR"\n'
+            'external_provider_ceilings = [{provider = "codex_cli", ceiling = 100}]\n'
+        )
+        policy = result.policy
+        self.assertEqual(
+            policy.runtime_environment_bindings,
+            (("JAVA_TOOL_OPTIONS", "-Djava.io.tmpdir=.tmp"),),
+        )
+        self.assertEqual(
+            policy.dispatch.call_ceiling("coder", "M001-S01"),
+            (2400.0, "role"),
+        )
+        self.assertEqual(
+            policy.dispatch.call_ceiling("coder", "M009-S03"),
+            (7200.0, "slice"),
+        )
+        self.assertEqual(policy.dispatch.scientific_subprocess_budget_seconds, 5400.0)
+        self.assertEqual(policy.dispatch.capture_truncation_disposition, "tolerate")
+        self.assertEqual(policy.reporting.currency, "EUR")
+        self.assertEqual(policy.reporting.external_provider_ceilings, (("codex_cli", 100.0),))
+        for optional in (
+            "runtime_environment_bindings",
+            "dispatch.role_call_ceiling_seconds",
+            "dispatch.slice_call_ceiling_overrides",
+            "dispatch.scientific_subprocess_budget_seconds",
+            "dispatch.capture_truncation_disposition",
+            "reporting.currency",
+            "reporting.external_provider_ceilings",
+        ):
+            self.assertNotIn(optional, result.defaulted)
 
     def test_unknown_keys_warn_but_load(self):
         result = self.load(
@@ -438,6 +525,21 @@ class PolicyRefusalTests(PolicyTestCase):
                     header + f"[frutlups]\n{key} = 0\n",
                     "numeric_range_invalid",
                 )
+
+    def test_new_optional_declarations_fail_closed_when_present(self):
+        header = f'schema_version = "{SCHEMA_VERSION}"\n'
+        cases = (
+            ('runtime_environment_bindings = [{name = "API_KEY", value = "x"}]\n', "environment_binding_name_invalid"),
+            ('runtime_environment_bindings = [{name = "JAVA_TOOL_OPTIONS", value = "token=DO-NOT-ECHO-123"}]\n', "environment_binding_value_invalid"),
+            ('[dispatch]\nrole_call_ceiling_seconds = {janitor = 5}\n', "field_type_invalid"),
+            ('[dispatch]\nslice_call_ceiling_overrides = [{slice_id = "../bad", ceiling_seconds = 5}]\n', "field_value_invalid"),
+            ('[dispatch]\ncapture_truncation_disposition = "ignore"\n', "enum_value_unknown"),
+            ('[reporting]\ncurrency = "EUR"\n', "reporting_declaration_incomplete"),
+            ('[reporting]\ncurrency = "eur"\nexternal_provider_ceilings = [{provider = "codex_cli", ceiling = 1}]\n', "field_value_invalid"),
+        )
+        for body, code in cases:
+            with self.subTest(code=code):
+                self.assert_refused(header + body, code)
 
 
 class SecretRefusalTests(PolicyTestCase):

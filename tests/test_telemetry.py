@@ -23,7 +23,19 @@ class TelemetryTests(unittest.TestCase):
         self.store = RunStore(self.root / ".frutlups_drive")
         self.store.create_run("run_001", {"contract_version": 1})
 
-    def attempt(self, role, *, tokens_in, tokens_out, cost, shadow=False):
+    def attempt(
+        self,
+        role,
+        *,
+        tokens_in,
+        tokens_out,
+        cost,
+        shadow=False,
+        adapter="mock",
+        cost_knowledge=None,
+        provider_duration=None,
+        retry_class="not_applicable",
+    ):
         create = (
             self.store.create_shadow_attempt
             if shadow
@@ -38,7 +50,7 @@ class TelemetryTests(unittest.TestCase):
             prompt_sha256="a" * 64,
             workspace=Path("workspace"),
             base_revision=None,
-            adapter="mock",
+            adapter=adapter,
             model="",
             effort="",
             workspace_access="read_only" if role is Role.REVIEWER else "workspace_write",
@@ -55,6 +67,13 @@ class TelemetryTests(unittest.TestCase):
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             cost_usd=cost,
+            cost_knowledge=(
+                cost_knowledge
+                if cost_knowledge is not None
+                else ("measured" if cost is not None else "unknown")
+            ),
+            provider_duration_seconds=provider_duration,
+            retry_class=retry_class,
         )
         self.store.write_request(attempt, request)
         self.store.write_result(attempt, result)
@@ -105,19 +124,28 @@ class TelemetryTests(unittest.TestCase):
         report = derive_report(self.store, "run_001")
         attempts = [
             {
-                "area": "primary", "attempt_id": "attempt_001", "cost_usd": 0.25,
+                "adapter": "mock", "area": "primary", "attempt_id": "attempt_001", "cost_usd": 0.25,
+                "cost_knowledge": "measured",
                 "dispatched_at": 101, "duration_seconds": 2, "outcome": "completed",
-                "role": "coder", "tokens_in": 10, "tokens_out": 5, "transition": "closed",
+                "observed_duration_seconds": None, "provider_duration_seconds": None,
+                "retry_class": "not_applicable", "role": "coder", "tokens_in": 10,
+                "tokens_out": 5, "transition": "closed", "truncated": False,
             },
             {
-                "area": "primary", "attempt_id": "attempt_002", "cost_usd": 0.10,
+                "adapter": "mock", "area": "primary", "attempt_id": "attempt_002", "cost_usd": 0.10,
+                "cost_knowledge": "measured",
                 "dispatched_at": 105, "duration_seconds": 2, "outcome": "completed",
-                "role": "reviewer", "tokens_in": None, "tokens_out": None, "transition": "closed",
+                "observed_duration_seconds": None, "provider_duration_seconds": None,
+                "retry_class": "not_applicable", "role": "reviewer", "tokens_in": None,
+                "tokens_out": None, "transition": "closed", "truncated": False,
             },
             {
-                "area": "shadow", "attempt_id": "attempt_001", "cost_usd": 0.05,
+                "adapter": "mock", "area": "shadow", "attempt_id": "attempt_001", "cost_usd": 0.05,
+                "cost_knowledge": "measured",
                 "dispatched_at": 107.5, "duration_seconds": 1.0, "outcome": "completed",
-                "role": "shadow_reviewer", "tokens_in": None, "tokens_out": None, "transition": "closed",
+                "observed_duration_seconds": None, "provider_duration_seconds": None,
+                "retry_class": "not_applicable", "role": "shadow_reviewer", "tokens_in": None,
+                "tokens_out": None, "transition": "closed", "truncated": False,
             },
         ]
         dispatches = [
@@ -132,6 +160,8 @@ class TelemetryTests(unittest.TestCase):
             "attempts": 3,
             "attempts_by_outcome": {"completed": 3},
             "attempts_by_role": {"coder": 1, "reviewer": 1, "shadow_reviewer": 1},
+            "attempts_by_cost_knowledge": {"measured": 3},
+            "attempts_with_truncated_capture": 0,
             "attempts_with_unknown_cost": 0,
             "attempts_with_unknown_tokens_in": 2,
             "attempts_with_unknown_tokens_out": 2,
@@ -157,6 +187,13 @@ class TelemetryTests(unittest.TestCase):
             "shadow_review": 1, "stop": 1, "verb": 1, "verification": 1,
         }
         independently_recomputed = {
+            "cost_reporting": {
+                "audit_statement": "No external per-provider ceilings were declared.",
+                "declared_external_provider_ceilings": [],
+                "provider_usage": [],
+                "reporting_currency": None,
+                "usage_auditable": False,
+            },
             "dispatches": dispatches,
             "errors": [],
             "run_id": "run_001",
@@ -223,6 +260,70 @@ class TelemetryTests(unittest.TestCase):
             if path.is_file()
         }
         self.assertEqual(after, before)
+
+    def test_cost_knowledge_classes_and_declared_ceilings_are_honest(self):
+        self.store = RunStore(self.root / "reporting_store")
+        self.store.create_run(
+            "run_001",
+            {
+                "contract_version": 1,
+                "reporting_currency": "EUR",
+                "external_provider_ceiling_001_provider": "codex_cli",
+                "external_provider_ceiling_001_amount": 100.0,
+                "external_provider_ceiling_002_provider": "kimi_cli",
+                "external_provider_ceiling_002_amount": 100.0,
+            },
+        )
+        self.attempt(
+            Role.CODER,
+            tokens_in=100,
+            tokens_out=20,
+            cost=0.5,
+            adapter="mock",
+        )
+        self.attempt(
+            Role.REVIEWER,
+            tokens_in=200,
+            tokens_out=40,
+            cost=None,
+            adapter="codex_cli",
+            cost_knowledge="subscription_prepaid",
+            provider_duration=12.5,
+        )
+        self.attempt(
+            Role.ARCHITECT,
+            tokens_in=None,
+            tokens_out=None,
+            cost=None,
+            adapter="kimi_cli",
+            cost_knowledge="unknown",
+            retry_class="provider_retryable",
+        )
+        report = derive_report(self.store, "run_001")
+        self.assertEqual(
+            report["summary"]["attempts_by_cost_knowledge"],
+            {"measured": 1, "subscription_prepaid": 1, "unknown": 1},
+        )
+        reporting = report["cost_reporting"]
+        self.assertEqual(reporting["reporting_currency"], "EUR")
+        self.assertEqual(
+            reporting["declared_external_provider_ceilings"],
+            [
+                {"ceiling": 100.0, "provider": "codex_cli"},
+                {"ceiling": 100.0, "provider": "kimi_cli"},
+            ],
+        )
+        self.assertFalse(reporting["usage_auditable"])
+        self.assertIn("cannot be audited", reporting["audit_statement"])
+        self.assertEqual(
+            reporting["provider_usage"][0]["cost_knowledge"],
+            {"subscription_prepaid": 1},
+        )
+        attempts = report["slices"][0]["attempts"]
+        prepaid = next(a for a in attempts if a["adapter"] == "codex_cli")
+        self.assertIsNone(prepaid["cost_usd"])
+        self.assertEqual(prepaid["cost_knowledge"], "subscription_prepaid")
+        self.assertEqual(prepaid["provider_duration_seconds"], 12.5)
 
 
 if __name__ == "__main__":

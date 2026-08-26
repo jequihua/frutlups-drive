@@ -539,6 +539,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
             "M001-S02",
             "M001-S03",
         ),
+        run_id: str = "run_001",
     ):
         policy_path = project / "frutlups_drive.toml"
         policy = load_execution_policy(policy_path).policy
@@ -548,9 +549,9 @@ class SecondPassRealPlanningTests(unittest.TestCase):
             project, policy, binding, policy_path.read_bytes()
         )
         store = RunStore(project / ".frutlups_drive")
-        if not store.run_exists("run_001"):
+        if not store.run_exists(run_id):
             store.create_run(
-                "run_001",
+                run_id,
                 {
                     "boundary": "roadmap_complete",
                     "contract_version": 1,
@@ -558,7 +559,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
                 },
             )
             store.append_event(
-                "run_001",
+                run_id,
                 {
                     "kind": "run_created",
                     "t": time.time(),
@@ -567,7 +568,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
             )
             for slice_id in accepted_slices:
                 store.append_event(
-                    "run_001",
+                    run_id,
                     {
                         "kind": "verb",
                         "t": time.time(),
@@ -583,7 +584,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         supervisor = _build_supervisor(
             project,
             store,
-            "run_001",
+            run_id,
             policy,
             "roadmap_complete",
             compiled,
@@ -592,7 +593,7 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         )
         executor = _SecondPassExecutor(
             store,
-            "run_001",
+            run_id,
             findings,
             needs_work_first=needs_work_first,
             second_findings=second_findings,
@@ -665,6 +666,50 @@ class SecondPassRealPlanningTests(unittest.TestCase):
         ]
         self.assertEqual(len(declaration), 1)
         self.assertEqual(declaration[0]["slices"], ["M001-S02"])
+
+    def test_fresh_run_drains_released_persisted_declaration_to_completion(self):
+        project = self._project("fresh_drain")
+        predecessor, store = self._supervisor(
+            project,
+            ("M001-S02",),
+            accepted_slices=("M001-S02",),
+        )
+        for expected in (
+            "pass_boundary",
+            "second_pass_worklist",
+            "verb:declare-rework",
+        ):
+            self.assertEqual(predecessor.tick().detail, expected)
+        declaration = next(
+            event
+            for event in store.read_events("run_001")
+            if event.get("kind") == "verb"
+            and event.get("verb") == "declare-rework"
+        )
+        self.assertTrue((project / declaration["artifact"]).is_file())
+
+        fresh, store = self._supervisor(
+            project,
+            (),
+            accepted_slices=(),
+            run_id="run_002",
+        )
+        result = fresh.run_until()
+
+        self.assertEqual((result.kind, result.detail), ("boundary", "complete"))
+        events = store.read_events("run_002")
+        self.assertFalse(
+            any(event["kind"] == "holistic_finding_unmappable" for event in events)
+        )
+        self.assertTrue(
+            any(
+                event.get("kind") == "verb"
+                and event.get("verb") == "record-verdict"
+                and event.get("slice") == "M001-S02"
+                for event in events
+            )
+        )
+        self.assertEqual(fresh._missing_worklist_slices(), ())
 
     def test_single_slice_rework_reaches_two_clean(self):
         project = self._project("single")

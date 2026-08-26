@@ -101,6 +101,7 @@ class ExportPolicyTests(unittest.TestCase):
                 "budget.py",
                 "cli.py",
                 "contracts.py",
+                "corrective.py",
                 "dispatch",
                 "escalate.py",
                 "frutlupscli.py",

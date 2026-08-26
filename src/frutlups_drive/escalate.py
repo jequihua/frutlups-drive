@@ -30,6 +30,9 @@ def write_escalation(
     safe_options: str,
     actions_not_taken: str,
     resume_command: str,
+    fresh_launch_command: str = "",
+    controlling_note_sha256: str = "",
+    predecessor_run_id: str = "",
 ) -> Path:
     key = f"{reason.value}:{slice_id or '-'}:{attempt_id or '-'}"
     for existing in store.list_escalations(run_id):
@@ -39,6 +42,20 @@ def write_escalation(
 
     number = len(store.list_escalations(run_id)) + 1
     filename = f"{number:03d}_{reason.value}.md"
+    fresh_header = ""
+    final_command = f"## Resume Command\n\n`{resume_command}`\n"
+    if fresh_launch_command:
+        fresh_header = (
+            "fresh_run_required = true\n"
+            f'fresh_launch_command = "{fresh_launch_command}"\n'
+            f'controlling_note_sha256 = "{controlling_note_sha256}"\n'
+            f'predecessor_run_id = "{predecessor_run_id}"\n'
+        )
+        final_command = (
+            "## Fresh Launch Command\n\n"
+            f"`{fresh_launch_command}`\n\n"
+            "Ordinary resume is refused for this lifecycle.\n"
+        )
     body = (
         f"# Escalation: {reason.value}\n"
         "\n"
@@ -48,6 +65,7 @@ def write_escalation(
         f'attempt_id = "{attempt_id}"\n'
         f'stop_reason = "{reason.value}"\n'
         f'escalation_key = "{key}"\n'
+        f"{fresh_header}"
         "```\n"
         "\n"
         "## Planning-State Snapshot\n"
@@ -70,8 +88,6 @@ def write_escalation(
         "\n"
         f"{actions_not_taken.rstrip()}\n"
         "\n"
-        "## Resume Command\n"
-        "\n"
-        f"`{resume_command}`\n"
+        f"{final_command}"
     )
     return store.create_escalation(run_id, filename, body.encode("utf-8"))

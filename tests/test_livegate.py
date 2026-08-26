@@ -83,6 +83,10 @@ class ReadyAssessmentTests(unittest.TestCase):
         self.assertIsNone(declaration.coder_corrective_effort)
         self.assertIsNone(declaration.reviewer_corrective_effort)
         self.assertIsNone(declaration.architect_corrective_effort)
+        self.assertEqual(declaration.role_call_ceiling_seconds, ())
+        self.assertEqual(declaration.slice_call_ceiling_overrides, ())
+        self.assertFalse(declaration.architect_corrective_turn_enabled)
+        self.assertEqual(declaration.max_architect_corrective_turns_per_run, 1)
 
     def test_present_valid_corrective_efforts_are_frozen_declaration_facts(self):
         source = valid_declaration()
@@ -103,6 +107,143 @@ class ReadyAssessmentTests(unittest.TestCase):
         self.assertEqual(
             assessment.declaration.architect_corrective_effort, "xhigh"
         )
+
+    def test_runtime_bindings_and_reporting_ceilings_are_typed_facts(self):
+        source = valid_declaration()
+        source.update(
+            runtime_environment_bindings=[
+                {"name": "JAVA_TOOL_OPTIONS", "value": "-Djava.io.tmpdir=.tmp"}
+            ],
+            reporting_currency="EUR",
+            external_provider_ceilings=[
+                {"provider": "codex_cli", "ceiling": 100}
+            ],
+        )
+        assessment = assess_live_gate(source)
+        self.assertTrue(assessment.ready, assessment.issues)
+        declaration = assessment.declaration
+        self.assertEqual(
+            declaration.runtime_environment_bindings,
+            (("JAVA_TOOL_OPTIONS", "-Djava.io.tmpdir=.tmp"),),
+        )
+        self.assertEqual(declaration.reporting_currency, "EUR")
+        self.assertEqual(
+            declaration.external_provider_ceilings,
+            (("codex_cli", 100.0),),
+        )
+
+    def test_dispatch_call_ceilings_are_canonical_typed_facts(self):
+        source = valid_declaration()
+        source.update(
+            role_call_ceiling_seconds={"reviewer": 45, "coder": 30},
+            slice_call_ceiling_overrides=[
+                {"slice_id": "M002-S01", "ceiling_seconds": 90},
+                {"slice_id": "M001-S01", "ceiling_seconds": 75},
+            ],
+        )
+        assessment = assess_live_gate(source)
+        self.assertTrue(assessment.ready, assessment.issues)
+        self.assertEqual(
+            assessment.declaration.role_call_ceiling_seconds,
+            (("coder", 30.0), ("reviewer", 45.0)),
+        )
+        self.assertEqual(
+            assessment.declaration.slice_call_ceiling_overrides,
+            (("M001-S01", 75.0), ("M002-S01", 90.0)),
+        )
+
+    def test_dispatch_call_ceiling_fields_fail_closed_when_present(self):
+        cases = (
+            (
+                {"role_call_ceiling_seconds": {"shadow_reviewer": 30}},
+                "role_call_ceiling_invalid",
+            ),
+            (
+                {"role_call_ceiling_seconds": {"coder": 604_801}},
+                "numeric_range_invalid",
+            ),
+            (
+                {
+                    "slice_call_ceiling_overrides": [
+                        {"slice_id": "M001-S01", "ceiling_seconds": 30},
+                        {"slice_id": "M001-S01", "ceiling_seconds": 45},
+                    ]
+                },
+                "slice_call_ceiling_invalid",
+            ),
+            (
+                {
+                    "slice_call_ceiling_overrides": [
+                        {
+                            "slice_id": "M001-S01",
+                            "ceiling_seconds": 30,
+                            "extra": True,
+                        }
+                    ]
+                },
+                "field_type_invalid",
+            ),
+        )
+        for updates, code in cases:
+            with self.subTest(code=code):
+                source = valid_declaration()
+                source.update(updates)
+                assessment = assess_live_gate(source)
+                self.assertFalse(assessment.ready)
+                self.assertIn(code, {issue.code for issue in assessment.issues})
+
+    def test_architect_corrective_turn_fields_are_typed_and_bounded(self):
+        source = valid_declaration()
+        source.update(
+            architect_corrective_turn_enabled=True,
+            max_architect_corrective_turns_per_run=2,
+        )
+        assessment = assess_live_gate(source)
+        self.assertTrue(assessment.ready, assessment.issues)
+        self.assertTrue(
+            assessment.declaration.architect_corrective_turn_enabled
+        )
+        self.assertEqual(
+            assessment.declaration.max_architect_corrective_turns_per_run, 2
+        )
+        cases = (
+            ({"architect_corrective_turn_enabled": "yes"}, "field_type_invalid"),
+            ({"max_architect_corrective_turns_per_run": 0}, "numeric_range_invalid"),
+            ({"max_architect_corrective_turns_per_run": 9}, "numeric_range_invalid"),
+        )
+        for updates, code in cases:
+            with self.subTest(updates=updates):
+                broken = valid_declaration()
+                broken.update(updates)
+                result = assess_live_gate(broken)
+                self.assertFalse(result.ready)
+                self.assertIn(code, {issue.code for issue in result.issues})
+
+    def test_runtime_and_reporting_optional_fields_fail_closed_when_present(self):
+        cases = (
+            (
+                {"runtime_environment_bindings": [{"name": "API_KEY", "value": "x"}]},
+                "environment_binding_name_invalid",
+            ),
+            (
+                {"runtime_environment_bindings": [{"name": "JAVA_TOOL_OPTIONS", "value": "token=DO-NOT-ECHO-123"}]},
+                "environment_binding_value_invalid",
+            ),
+            ({"reporting_currency": "EUR"}, "reporting_declaration_incomplete"),
+            (
+                {
+                    "reporting_currency": "EUR",
+                    "external_provider_ceilings": [{"provider": "manual", "ceiling": 1}],
+                },
+                "provider_ceiling_invalid",
+            ),
+        )
+        for updates, code in cases:
+            with self.subTest(code=code):
+                source = valid_declaration()
+                source.update(updates)
+                assessment = assess_live_gate(source)
+                self.assertIn(code, {issue.code for issue in assessment.issues})
 
     def test_assessment_and_declaration_are_frozen(self):
         assessment = assess_live_gate(valid_declaration())
@@ -451,7 +592,7 @@ class SecretHandlingTests(IssueTestCase):
         )
 
 
-def gate_markdown(approval="approved"):
+def gate_markdown(approval="approved", extra=""):
     return f'''# Test Gate
 
 ```toml
@@ -469,6 +610,7 @@ max_call_cost_usd = 2.0
 call_timeout_seconds = 1800.0
 rollback_statement = "Delete the disposable fixture."
 kill_switch_statement = "Create the declared stop file."
+{extra}
 [stop_conditions]
 cost = "Stop at the cost ceiling."
 time = "Stop at the time ceiling."

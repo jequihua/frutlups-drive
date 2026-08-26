@@ -4,13 +4,15 @@ The binding file is machine-local and ignored.  It declares absolute argv
 prefixes for ``codex_cli``, ``kimi_cli``, and ``claude_cli`` plus the Kimi config file
 whose effective effort is checked before dispatch.  Provider output remains
 transport evidence: stdout and stderr are captured verbatim by the accepted
-subprocess executor and are never parsed for loop control, usage, cost, or a
-verdict.
+subprocess executor. Complete strict-JSON usage records may additionally yield
+tokens and provider-reported duration; text is never parsed for a verdict or
+cost and subscription seats never emit a numeric zero-cost fact.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -149,9 +151,18 @@ class ProviderRuntimeBindings:
     child_env: tuple[tuple[str, str], ...]
     timeout_seconds: float
     max_call_cost_usd: float
+    runtime_environment_bindings: tuple[tuple[str, str], ...] = ()
 
     def manifest_facts(self) -> dict[str, str]:
-        return self.bundle.manifest_facts()
+        facts = self.bundle.manifest_facts()
+        for index, (name, literal) in enumerate(
+            self.runtime_environment_bindings, 1
+        ):
+            facts[f"runtime_environment_binding_{index:03d}_name"] = name
+            facts[
+                f"runtime_environment_binding_{index:03d}_value_sha256"
+            ] = hashlib.sha256(literal.encode("utf-8")).hexdigest()
+        return facts
 
 
 def _read_bounded(path: Path, maximum: int, *, missing: str, oversized: str) -> bytes:
@@ -450,6 +461,8 @@ def build_provider_runtime(
     if sys.platform == "win32":
         names.extend(WINDOWS_PROCESS_ENV_NAMES)
     names.append(BYTECODE_HYGIENE_ENV[0])
+    runtime_literals = dict(declaration.runtime_environment_bindings)
+    names.extend(name for name, _ in declaration.runtime_environment_bindings)
     if len(names) != len(set(names)):
         raise ProviderBindingError(
             "provider_env_invalid", "the restricted child environment has duplicate names"
@@ -459,7 +472,11 @@ def build_provider_runtime(
         value = (
             BYTECODE_HYGIENE_ENV[1]
             if name == BYTECODE_HYGIENE_ENV[0]
-            else source.get(name, "")
+            else (
+                runtime_literals[name]
+                if name in runtime_literals
+                else source.get(name, "")
+            )
         )
         if not isinstance(value, str):
             raise ProviderBindingError(
@@ -475,6 +492,7 @@ def build_provider_runtime(
         child_env=tuple(pairs),
         timeout_seconds=declaration.call_timeout_seconds,
         max_call_cost_usd=declaration.max_call_cost_usd,
+        runtime_environment_bindings=declaration.runtime_environment_bindings,
     )
 
 
@@ -589,7 +607,14 @@ class _PromptStdinRunner:
         stdout_path,
         stderr_path,
         max_stream_bytes=1_048_576,
+        terminate_on_overflow=True,
     ):
+        kwargs = {
+            "max_stream_bytes": max_stream_bytes,
+            "stdin_bytes": self._prompt_bytes,
+        }
+        if not terminate_on_overflow:
+            kwargs["terminate_on_overflow"] = False
         return self._runner.run(
             argv,
             cwd,
@@ -597,8 +622,7 @@ class _PromptStdinRunner:
             timeout_seconds,
             stdout_path,
             stderr_path,
-            max_stream_bytes=max_stream_bytes,
-            stdin_bytes=self._prompt_bytes,
+            **kwargs,
         )
 
 
@@ -611,11 +635,17 @@ class ProviderCliExecutor:
         adapter: str,
         runner: ProcessRunner,
         log_root: Path,
+        capture_truncation_disposition: str = "invalidate",
     ) -> None:
         self._runtime = runtime
         self._launch = runtime.bundle.launch_for(adapter)
         self._runner = runner
         self._log_root = Path(log_root)
+        if capture_truncation_disposition not in ("invalidate", "tolerate"):
+            raise ValueError("unknown capture truncation disposition")
+        self._tolerate_truncation = (
+            capture_truncation_disposition == "tolerate"
+        )
 
     def execute(self, request: AgentRunRequest) -> AgentRunResult:
         if request.adapter != self._launch.adapter:
@@ -677,7 +707,10 @@ class ProviderCliExecutor:
             argv=argv,
             command_id=self._launch.adapter.replace("_", "-"),
             env=self._runtime.child_env,
-            timeout_seconds=self._runtime.timeout_seconds,
+            # The supervisor has already resolved slice -> role -> global.
+            # Keeping the request ceiling here avoids reapplying the global
+            # default over an explicit governed override.
+            timeout_seconds=float(request.max_seconds),
             prompt_capture_name=prompt_capture.name,
         )
         runner = (
@@ -687,7 +720,11 @@ class ProviderCliExecutor:
         )
         try:
             result = SubprocessAgentExecutor(
-                spec, runner, capture_root
+                spec,
+                runner,
+                capture_root,
+                spool_root=Path(request.prompt_path).parent / "capture_spool",
+                tolerate_truncation=self._tolerate_truncation,
             ).execute(request)
         except SubprocessAgentFailure:
             # ``runner_failure`` is written to the bounded event log before
@@ -710,8 +747,66 @@ class ProviderCliExecutor:
                 tokens_in=None,
                 tokens_out=None,
                 cost_usd=None,
+                cost_knowledge="subscription_prepaid",
             )
-        # All approved seats are subscription CLIs.  The raw CLI usage text
-        # remains verbatim in stdout/stderr captures; no transport text is
-        # interpreted into token, cost, verdict, or control facts.
-        return replace(result, cost_usd=0.0)
+        tokens_in, tokens_out, provider_duration = _provider_usage(
+            capture_root
+            / f"{request.run_id}_{request.attempt_id}_stdout.txt"
+        )
+        # All approved seats are prepaid subscription CLIs. A missing price
+        # fact is typed honestly and can never masquerade as USD 0.00.
+        return replace(
+            result,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            provider_duration_seconds=provider_duration,
+            cost_usd=None,
+            cost_knowledge="subscription_prepaid",
+        )
+
+
+def _provider_usage(path: Path) -> tuple[int | None, int | None, float | None]:
+    """Extract bounded provider-exposed usage from complete JSONL records."""
+
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None, None, None
+    tokens_in: int | None = None
+    tokens_out: int | None = None
+    duration: float | None = None
+    for line in raw.splitlines():
+        try:
+            record = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(record, dict):
+            continue
+        candidates = [record]
+        for key in ("usage", "result", "metrics"):
+            child = record.get(key)
+            if isinstance(child, dict):
+                candidates.append(child)
+                nested = child.get("usage")
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+        for candidate in candidates:
+            for key in ("input_tokens", "tokens_in", "prompt_tokens"):
+                value = candidate.get(key)
+                if type(value) is int and value >= 0:
+                    tokens_in = value
+            for key in ("output_tokens", "tokens_out", "completion_tokens"):
+                value = candidate.get(key)
+                if type(value) is int and value >= 0:
+                    tokens_out = value
+            for key, scale in (
+                ("duration_seconds", 1.0),
+                ("duration_ms", 0.001),
+                ("duration_api_ms", 0.001),
+            ):
+                value = candidate.get(key)
+                if type(value) in (int, float):
+                    numeric = float(value) * scale
+                    if math.isfinite(numeric) and numeric >= 0.0:
+                        duration = numeric
+    return tokens_in, tokens_out, duration

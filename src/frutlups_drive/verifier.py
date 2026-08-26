@@ -35,11 +35,16 @@ from pathlib import Path
 from typing import Protocol
 
 from frutlups_drive.budget import Clock
+from frutlups_drive.contracts import LadderFailureClass
 from frutlups_drive.runstore import RunStore, _toml_string
 from frutlups_drive.workspace import WorkspaceManager
 
 
 MAX_STREAM_CAPTURE_BYTES = 1_048_576
+# Overflow evidence is intentionally much smaller than the unchanged 1 MiB
+# admission ceiling: each stream retains a fixed 64 KiB head and 64 KiB tail.
+CAPTURE_SPOOL_HEAD_BYTES = 65_536
+CAPTURE_SPOOL_TAIL_BYTES = 65_536
 
 
 def _validate_timeout_seconds(value: object) -> float:
@@ -107,6 +112,14 @@ class ProcessOutcome:
     timed_out: bool
     stdout_overflow: bool = False
     stderr_overflow: bool = False
+    stdout_total_bytes: int = 0
+    stderr_total_bytes: int = 0
+    stdout_event_count: int = 0
+    stderr_event_count: int = 0
+    stdout_head: bytes = b""
+    stdout_tail: bytes = b""
+    stderr_head: bytes = b""
+    stderr_tail: bytes = b""
 
 
 @dataclass(frozen=True)
@@ -115,6 +128,10 @@ class VerificationOutcome:
     evidence_dir: Path
     dirty_files: tuple[str, ...]
     evidence_sha256: str = ""
+    failure_class: LadderFailureClass | None = None
+    timed_out: bool = False
+    measured_duration_seconds: float | None = None
+    ceiling_seconds: float | None = None
 
 
 class ProcessRunner(Protocol):
@@ -128,6 +145,7 @@ class ProcessRunner(Protocol):
         stderr_path: Path,
         max_stream_bytes: int = MAX_STREAM_CAPTURE_BYTES,
         stdin_bytes: bytes | None = None,
+        terminate_on_overflow: bool = True,
     ) -> ProcessOutcome:
         ...
 
@@ -409,11 +427,25 @@ def _read_status(path: Path) -> int | None:
 
 
 class _DrainState:
-    __slots__ = ("captured", "total", "overflow", "done", "failures")
+    __slots__ = (
+        "captured",
+        "head",
+        "tail",
+        "total",
+        "event_count",
+        "last_byte",
+        "overflow",
+        "done",
+        "failures",
+    )
 
     def __init__(self) -> None:
         self.captured = bytearray()
+        self.head = bytearray()
+        self.tail = bytearray()
         self.total = 0
+        self.event_count = 0
+        self.last_byte: int | None = None
         self.overflow = False
         self.done = False
         # Bounded worker-result channel (R4-F2): at most one read-failure
@@ -434,10 +466,19 @@ def _drain_stream(stream, limit: int, state: _DrainState, wake) -> None:
                 if not chunk:
                     break
                 state.total += len(chunk)
+                state.event_count += chunk.count(b"\n")
+                state.last_byte = chunk[-1]
                 if len(state.captured) < limit:
                     state.captured.extend(
                         chunk[: limit - len(state.captured)]
                     )
+                if len(state.head) < CAPTURE_SPOOL_HEAD_BYTES:
+                    state.head.extend(
+                        chunk[: CAPTURE_SPOOL_HEAD_BYTES - len(state.head)]
+                    )
+                state.tail.extend(chunk)
+                if len(state.tail) > CAPTURE_SPOOL_TAIL_BYTES:
+                    del state.tail[:-CAPTURE_SPOOL_TAIL_BYTES]
                 if state.total > limit and not state.overflow:
                     state.overflow = True
                     wake.set()
@@ -448,6 +489,8 @@ def _drain_stream(stream, limit: int, state: _DrainState, wake) -> None:
         except Exception:
             state.failures.append("drain_close_failed")
     finally:
+        if state.total and state.last_byte != ord("\n"):
+            state.event_count += 1
         state.done = True
         wake.set()
 
@@ -596,6 +639,7 @@ def _run_windows_lifecycle(
     err_state: _DrainState,
     max_stream_bytes: int,
     stdin_bytes=None,
+    terminate_on_overflow: bool = True,
 ) -> bool:
     """Explicit Windows lifecycle controller (R3-F2, R4-F2).
 
@@ -655,8 +699,10 @@ def _run_windows_lifecycle(
         while True:
             if out_state.failures or err_state.failures:
                 break  # a worker failure authorizes cleanup (R4-F2)
-            if out_state.overflow or err_state.overflow:
-                break  # overflow authorizes tree cleanup
+            if terminate_on_overflow and (
+                out_state.overflow or err_state.overflow
+            ):
+                break  # fail-closed overflow keeps the historical fast stop
             if _status_ready(status_path):
                 break  # the command finished; only the anchor tree remains
             if process.poll() is not None:
@@ -744,15 +790,17 @@ def _run_posix_lifecycle(
     err_state: _DrainState,
     max_stream_bytes: int,
     stdin_bytes=None,
+    terminate_on_overflow: bool = True,
 ) -> tuple[int | None, bool]:
     """Explicit POSIX lifecycle controller (R3-F2).
 
     Command completion is ``poll()``; capture EOF is only a stream fact. If
     both drains reach EOF while the command is still running, the controller
     remains in the lifecycle until the real exit or the declared deadline.
-    Termination is authorized by timeout, overflow, internal failure, or
-    owned-group cleanup after real completion — never by capture completion
-    alone — and the command's real exit code is never replaced.
+    Termination is authorized by timeout, internal failure, fail-closed
+    overflow, or owned-group cleanup after real completion. A tolerated
+    overflow keeps draining only bounded head/tail state until real exit or
+    timeout. The command's real exit code is never replaced.
     """
     process = (
         _spawn_posix(argv, cwd, env)
@@ -783,8 +831,10 @@ def _run_posix_lifecycle(
                 break
             if out_state.failures or err_state.failures:
                 break  # a worker failure authorizes cleanup (R4-F2)
-            if out_state.overflow or err_state.overflow:
-                break  # overflow authorizes ending the live group
+            if terminate_on_overflow and (
+                out_state.overflow or err_state.overflow
+            ):
+                break  # fail-closed overflow keeps the historical fast stop
             if time.monotonic() >= deadline:
                 timed_out = True
                 break
@@ -799,8 +849,8 @@ def _run_posix_lifecycle(
     if failures:
         raise OSError(_cleanup_failure_message(failures))
     if exit_code is None and not timed_out:
-        # Ended under the overflow authority before exit: the reaped code
-        # is the honest outcome.
+        # A worker/internal cleanup path may have ended before poll observed
+        # the exit; the reaped code is the honest outcome.
         exit_code = process.returncode
     return exit_code, timed_out
 
@@ -808,8 +858,8 @@ def _run_posix_lifecycle(
 def _posix_cleanup(process, workers) -> list[str]:
     """Attempt-all bounded POSIX finalization (R4-F2).
 
-    The group kill is authorized here by timeout, overflow, worker or
-    internal failure while the command lives, and is owned descendant
+    The group kill is authorized here by timeout, worker or internal failure
+    while the command lives, and is owned descendant
     cleanup after real completion; a dead group is a no-op. If group
     termination raises while the direct process remains live, one direct
     termination through the retained handle is attempted. Either failure
@@ -855,6 +905,7 @@ class SubprocessRunner:
         stderr_path: Path,
         max_stream_bytes: int = MAX_STREAM_CAPTURE_BYTES,
         stdin_bytes: bytes | None = None,
+        terminate_on_overflow: bool = True,
     ) -> ProcessOutcome:
         # R4-F1: the defensive pre-effect timeout boundary — the same
         # normalizer as the declaration boundary, applied before anything
@@ -875,11 +926,13 @@ class SubprocessRunner:
                     timed_out = _run_windows_lifecycle(
                         argv, cwd, env, timeout_seconds, status_path,
                         out_state, err_state, max_stream_bytes,
+                        terminate_on_overflow=terminate_on_overflow,
                     )
                 else:
                     timed_out = _run_windows_lifecycle(
                         argv, cwd, env, timeout_seconds, status_path,
                         out_state, err_state, max_stream_bytes, stdin_bytes,
+                        terminate_on_overflow,
                     )
                 if not timed_out:
                     exit_code = _read_status(status_path)
@@ -888,11 +941,13 @@ class SubprocessRunner:
                     exit_code, timed_out = _run_posix_lifecycle(
                         argv, cwd, env, timeout_seconds,
                         out_state, err_state, max_stream_bytes,
+                        terminate_on_overflow=terminate_on_overflow,
                     )
                 else:
                     exit_code, timed_out = _run_posix_lifecycle(
                         argv, cwd, env, timeout_seconds,
                         out_state, err_state, max_stream_bytes, stdin_bytes,
+                        terminate_on_overflow,
                     )
         finally:
             for control in (status_path, Path(str(status_path) + ".tmp")):
@@ -909,6 +964,14 @@ class SubprocessRunner:
             timed_out,
             stdout_overflow=out_state.overflow,
             stderr_overflow=err_state.overflow,
+            stdout_total_bytes=out_state.total,
+            stderr_total_bytes=err_state.total,
+            stdout_event_count=out_state.event_count,
+            stderr_event_count=err_state.event_count,
+            stdout_head=bytes(out_state.head),
+            stdout_tail=bytes(out_state.tail),
+            stderr_head=bytes(err_state.head),
+            stderr_tail=bytes(err_state.tail),
         )
 
 
@@ -1019,6 +1082,20 @@ class Verifier:
             for path in dirty
         )
         passed = all_ok and dirty_ok
+        failure_class = None
+        if not passed:
+            if any(
+                record["timed_out"]
+                or record["stdout_overflow"]
+                or record["stderr_overflow"]
+                or record["exit_code"] is None
+                for record in command_records
+            ):
+                failure_class = LadderFailureClass.TRANSPORT
+            elif not dirty_ok:
+                failure_class = LadderFailureClass.PATH_CONTRACT
+            else:
+                failure_class = LadderFailureClass.PRODUCT_FINDING
 
         run_id, slice_id, attempt_id = _attempt_identity(self._store, attempt_dir)
         evidence = _evidence_toml(
@@ -1033,11 +1110,31 @@ class Verifier:
         )
         files["evidence.toml"] = evidence
         evidence_dir = self._store.publish_verification(attempt_dir, files)
+        timed_out_records = [
+            record for record in command_records if record["timed_out"] is True
+        ]
+        timeout_record = timed_out_records[0] if timed_out_records else None
         return VerificationOutcome(
-            passed,
-            evidence_dir,
-            tuple(dirty),
-            hashlib.sha256(evidence).hexdigest(),
+            passed=passed,
+            evidence_dir=evidence_dir,
+            dirty_files=tuple(dirty),
+            evidence_sha256=hashlib.sha256(evidence).hexdigest(),
+            failure_class=failure_class,
+            timed_out=timeout_record is not None,
+            measured_duration_seconds=(
+                max(
+                    0.0,
+                    float(timeout_record["ended"])
+                    - float(timeout_record["started"]),
+                )
+                if timeout_record is not None
+                else None
+            ),
+            ceiling_seconds=(
+                float(timeout_record["timeout_seconds"])
+                if timeout_record is not None
+                else None
+            ),
         )
 
 

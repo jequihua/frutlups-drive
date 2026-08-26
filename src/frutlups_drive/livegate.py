@@ -3,8 +3,10 @@
 Expresses — without any I/O, environment read, file discovery, or execution
 authority — the shape of the owner decision: exact architect, coder, and
 reviewer seat identities, credential environment-variable *names* only, cost
-ceilings, per-call timeout, rollback/kill-switch statements, and explicit
-stop conditions.
+ceilings, approved non-secret runtime name/literal bindings, reporting
+currency and external provider ceilings, per-call timeout and canonical
+role/slice call-ceiling declarations,
+rollback/kill-switch statements, and explicit stop conditions.
 
 The declaration assessment remains a pure in-memory validation boundary:
 
@@ -33,7 +35,14 @@ from hashlib import sha256
 from pathlib import Path
 
 from frutlups_drive.planstate import _is_valid_artifact_reference
-from frutlups_drive.policy import _ADAPTER_VALUES, _secret_shaped
+from frutlups_drive.policy import (
+    _ADAPTER_VALUES,
+    _BOUNDED_ID,
+    _DISPATCH_CALL_CEILING_ROLES,
+    _MAX_ARCHITECT_CORRECTIVE_TURNS_PER_RUN,
+    _MAX_DISPATCH_CALL_CEILING_SECONDS,
+    _secret_shaped,
+)
 from frutlups_drive.dispatch.provider_cli import (
     ProviderBindingError,
     catalog_effort_schedule,
@@ -76,6 +85,16 @@ _OPTIONAL_STRING_FIELDS = (
     "reviewer_corrective_effort",
     "architect_corrective_effort",
 )
+_OPTIONAL_FIELDS = (
+    *_OPTIONAL_STRING_FIELDS,
+    "runtime_environment_bindings",
+    "architect_corrective_turn_enabled",
+    "max_architect_corrective_turns_per_run",
+    "role_call_ceiling_seconds",
+    "slice_call_ceiling_overrides",
+    "reporting_currency",
+    "external_provider_ceilings",
+)
 _NUMERIC_FIELDS = (
     "max_total_cost_usd",
     "max_call_cost_usd",
@@ -97,10 +116,10 @@ _FIELD_VOCABULARY = (
     "rollback_statement",
     "kill_switch_statement",
     "stop_conditions",
-    *_OPTIONAL_STRING_FIELDS,
+    *_OPTIONAL_FIELDS,
 )
 _REQUIRED_FIELDS = tuple(
-    field for field in _FIELD_VOCABULARY if field not in _OPTIONAL_STRING_FIELDS
+    field for field in _FIELD_VOCABULARY if field not in _OPTIONAL_FIELDS
 )
 
 
@@ -127,6 +146,13 @@ class LiveGateDeclaration:
     rollback_statement: str
     kill_switch_statement: str
     stop_conditions: tuple[tuple[str, str], ...]
+    runtime_environment_bindings: tuple[tuple[str, str], ...] = ()
+    architect_corrective_turn_enabled: bool = False
+    max_architect_corrective_turns_per_run: int = 1
+    role_call_ceiling_seconds: tuple[tuple[str, float], ...] = ()
+    slice_call_ceiling_overrides: tuple[tuple[str, float], ...] = ()
+    reporting_currency: str | None = None
+    external_provider_ceilings: tuple[tuple[str, float], ...] = ()
     coder_corrective_effort: str | None = None
     reviewer_corrective_effort: str | None = None
     architect_corrective_effort: str | None = None
@@ -222,6 +248,10 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
     ``adapter_unknown``, ``adapter_not_live``, ``identity_missing``,
     ``identical_seats``, ``credential_names_missing``,
     ``credential_name_invalid``, ``numeric_range_invalid``,
+    ``environment_binding_name_invalid``,
+    ``environment_binding_value_invalid``, ``role_call_ceiling_invalid``,
+    ``slice_call_ceiling_invalid``, ``reporting_currency_invalid``,
+    ``provider_ceiling_invalid``, ``reporting_declaration_incomplete``,
     ``statement_missing``, ``stop_category_unknown``, and
     ``stop_category_missing``.
     """
@@ -254,7 +284,7 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
             issues.append(LiveGateIssue("field_missing", field))
         else:
             values[field] = source[field]
-    for field in _OPTIONAL_STRING_FIELDS:
+    for field in _OPTIONAL_FIELDS:
         if field in source:
             values[field] = source[field]
 
@@ -369,6 +399,252 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
             else:
                 credentials = tuple(raw_names)
 
+    runtime_bindings: tuple[tuple[str, str], ...] = ()
+    if "runtime_environment_bindings" in values:
+        raw_bindings = values["runtime_environment_bindings"]
+        if not isinstance(raw_bindings, (list, tuple)):
+            issues.append(
+                LiveGateIssue(
+                    "field_type_invalid", "runtime_environment_bindings"
+                )
+            )
+        else:
+            collected_bindings: list[tuple[str, str]] = []
+            seen_names: set[str] = set()
+            for binding in raw_bindings:
+                if not isinstance(binding, Mapping) or set(binding) != {
+                    "name",
+                    "value",
+                }:
+                    issues.append(
+                        LiveGateIssue(
+                            "field_type_invalid",
+                            "runtime_environment_bindings",
+                        )
+                    )
+                    break
+                name = binding.get("name")
+                literal = binding.get("value")
+                if (
+                    not isinstance(name, str)
+                    or not _ENV_NAME.fullmatch(name)
+                    or _secret_shaped(name)
+                    or name in seen_names
+                ):
+                    issues.append(
+                        LiveGateIssue(
+                            "environment_binding_name_invalid",
+                            "runtime_environment_bindings",
+                        )
+                    )
+                    break
+                if (
+                    not isinstance(literal, str)
+                    or not literal
+                    or len(literal.encode("utf-8")) > 8192
+                    or "\x00" in literal
+                    or _secret_shaped_value(literal)
+                ):
+                    issues.append(
+                        LiveGateIssue(
+                            "environment_binding_value_invalid",
+                            "runtime_environment_bindings",
+                        )
+                    )
+                    break
+                seen_names.add(name)
+                collected_bindings.append((name, literal))
+            else:
+                runtime_bindings = tuple(sorted(collected_bindings))
+
+    corrective_turn_enabled = False
+    if "architect_corrective_turn_enabled" in values:
+        raw_enabled = values["architect_corrective_turn_enabled"]
+        if type(raw_enabled) is not bool:
+            issues.append(
+                LiveGateIssue(
+                    "field_type_invalid", "architect_corrective_turn_enabled"
+                )
+            )
+        else:
+            corrective_turn_enabled = raw_enabled
+
+    corrective_turn_max = 1
+    if "max_architect_corrective_turns_per_run" in values:
+        raw_max = values["max_architect_corrective_turns_per_run"]
+        if type(raw_max) is not int:
+            issues.append(
+                LiveGateIssue(
+                    "field_type_invalid",
+                    "max_architect_corrective_turns_per_run",
+                )
+            )
+        elif not 1 <= raw_max <= _MAX_ARCHITECT_CORRECTIVE_TURNS_PER_RUN:
+            issues.append(
+                LiveGateIssue(
+                    "numeric_range_invalid",
+                    "max_architect_corrective_turns_per_run",
+                )
+            )
+        else:
+            corrective_turn_max = raw_max
+
+    role_call_ceilings: tuple[tuple[str, float], ...] = ()
+    if "role_call_ceiling_seconds" in values:
+        raw_role_ceilings = values["role_call_ceiling_seconds"]
+        if not isinstance(raw_role_ceilings, Mapping):
+            issues.append(
+                LiveGateIssue("field_type_invalid", "role_call_ceiling_seconds")
+            )
+        else:
+            collected_role_ceilings: list[tuple[str, float]] = []
+            for role, seconds in raw_role_ceilings.items():
+                if (
+                    not isinstance(role, str)
+                    or role not in _DISPATCH_CALL_CEILING_ROLES
+                ):
+                    issues.append(
+                        LiveGateIssue(
+                            "role_call_ceiling_invalid",
+                            "role_call_ceiling_seconds",
+                        )
+                    )
+                    break
+                number = _dispatch_call_ceiling_seconds(
+                    seconds, "role_call_ceiling_seconds", issues
+                )
+                if number is None:
+                    break
+                collected_role_ceilings.append((role, number))
+            else:
+                role_call_ceilings = tuple(sorted(collected_role_ceilings))
+
+    slice_call_ceilings: tuple[tuple[str, float], ...] = ()
+    if "slice_call_ceiling_overrides" in values:
+        raw_slice_ceilings = values["slice_call_ceiling_overrides"]
+        if not isinstance(raw_slice_ceilings, (list, tuple)):
+            issues.append(
+                LiveGateIssue("field_type_invalid", "slice_call_ceiling_overrides")
+            )
+        else:
+            collected_slice_ceilings: list[tuple[str, float]] = []
+            seen_slice_ids: set[str] = set()
+            for ceiling in raw_slice_ceilings:
+                if not isinstance(ceiling, Mapping) or set(ceiling) != {
+                    "slice_id",
+                    "ceiling_seconds",
+                }:
+                    issues.append(
+                        LiveGateIssue(
+                            "field_type_invalid", "slice_call_ceiling_overrides"
+                        )
+                    )
+                    break
+                slice_id = ceiling.get("slice_id")
+                if (
+                    not isinstance(slice_id, str)
+                    or not _BOUNDED_ID.fullmatch(slice_id)
+                    or slice_id in seen_slice_ids
+                ):
+                    issues.append(
+                        LiveGateIssue(
+                            "slice_call_ceiling_invalid",
+                            "slice_call_ceiling_overrides",
+                        )
+                    )
+                    break
+                number = _dispatch_call_ceiling_seconds(
+                    ceiling.get("ceiling_seconds"),
+                    "slice_call_ceiling_overrides",
+                    issues,
+                )
+                if number is None:
+                    break
+                seen_slice_ids.add(slice_id)
+                collected_slice_ceilings.append((slice_id, number))
+            else:
+                slice_call_ceilings = tuple(sorted(collected_slice_ceilings))
+
+    reporting_currency: str | None = None
+    if "reporting_currency" in values:
+        raw_currency = values["reporting_currency"]
+        if (
+            not isinstance(raw_currency, str)
+            or not re.fullmatch(r"[A-Z]{3}", raw_currency)
+        ):
+            issues.append(
+                LiveGateIssue("reporting_currency_invalid", "reporting_currency")
+            )
+        else:
+            reporting_currency = raw_currency
+
+    provider_ceilings: tuple[tuple[str, float], ...] = ()
+    if "external_provider_ceilings" in values:
+        raw_ceilings = values["external_provider_ceilings"]
+        if not isinstance(raw_ceilings, (list, tuple)):
+            issues.append(
+                LiveGateIssue(
+                    "field_type_invalid", "external_provider_ceilings"
+                )
+            )
+        else:
+            collected_ceilings: list[tuple[str, float]] = []
+            seen_providers: set[str] = set()
+            for ceiling in raw_ceilings:
+                if not isinstance(ceiling, Mapping) or set(ceiling) != {
+                    "provider",
+                    "ceiling",
+                }:
+                    issues.append(
+                        LiveGateIssue(
+                            "field_type_invalid", "external_provider_ceilings"
+                        )
+                    )
+                    break
+                provider = ceiling.get("provider")
+                amount = ceiling.get("ceiling")
+                if (
+                    not isinstance(provider, str)
+                    or provider not in EXTERNAL_ADAPTERS
+                    or provider in seen_providers
+                ):
+                    issues.append(
+                        LiveGateIssue(
+                            "provider_ceiling_invalid",
+                            "external_provider_ceilings",
+                        )
+                    )
+                    break
+                if not _is_plain_number(amount) or type(amount) is bool:
+                    issues.append(
+                        LiveGateIssue(
+                            "field_type_invalid", "external_provider_ceilings"
+                        )
+                    )
+                    break
+                try:
+                    number = float(amount)
+                except OverflowError:
+                    number = math.inf
+                if not math.isfinite(number) or number < 0.0:
+                    issues.append(
+                        LiveGateIssue(
+                            "numeric_range_invalid",
+                            "external_provider_ceilings",
+                        )
+                    )
+                    break
+                seen_providers.add(provider)
+                collected_ceilings.append((provider, number))
+            else:
+                provider_ceilings = tuple(sorted(collected_ceilings))
+    if bool(reporting_currency) != bool(provider_ceilings):
+        issues.append(
+            LiveGateIssue(
+                "reporting_declaration_incomplete", "external_provider_ceilings"
+            )
+        )
+
     for field in ("max_total_cost_usd", "max_call_cost_usd"):
         number = values.get(field)
         if isinstance(number, float) and number < 0:
@@ -450,11 +726,38 @@ def assess_live_gate(source: Mapping[str, object]) -> LiveGateAssessment:
         rollback_statement=str(values["rollback_statement"]),
         kill_switch_statement=str(values["kill_switch_statement"]),
         stop_conditions=stop_pairs,
+        runtime_environment_bindings=runtime_bindings,
+        architect_corrective_turn_enabled=corrective_turn_enabled,
+        max_architect_corrective_turns_per_run=corrective_turn_max,
+        role_call_ceiling_seconds=role_call_ceilings,
+        slice_call_ceiling_overrides=slice_call_ceilings,
+        reporting_currency=reporting_currency,
+        external_provider_ceilings=provider_ceilings,
         coder_corrective_effort=values.get("coder_corrective_effort"),
         reviewer_corrective_effort=values.get("reviewer_corrective_effort"),
         architect_corrective_effort=values.get("architect_corrective_effort"),
     )
     return LiveGateAssessment(True, (), declaration)
+
+
+def _dispatch_call_ceiling_seconds(
+    value: object,
+    field: str,
+    issues: list[LiveGateIssue],
+) -> float | None:
+    if not _is_plain_number(value) or type(value) is bool:
+        issues.append(LiveGateIssue("field_type_invalid", field))
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number) or not (
+        0.0 < number <= _MAX_DISPATCH_CALL_CEILING_SECONDS
+    ):
+        issues.append(LiveGateIssue("numeric_range_invalid", field))
+        return None
+    return number
 
 
 def _empty(value: object) -> bool:

@@ -21,7 +21,7 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from frutlups_drive import killswitch, ladder
@@ -29,10 +29,18 @@ from frutlups_drive.budget import BudgetCounters, BudgetGate, Clock
 from frutlups_drive.contracts import (
     AgentRunRequest,
     AgentRunResult,
+    CorrectiveFailureClass,
+    LadderFailureClass,
     LoopStep,
     PlanOutcome,
     Role,
     StopReason,
+)
+from frutlups_drive.corrective import (
+    CORRECTIVE_PROPOSAL_NAME,
+    MAX_CORRECTIVE_PROPOSAL_BYTES,
+    CorrectiveProposalRefusal,
+    CorrectiveProposalWriter,
 )
 from frutlups_drive.dispatch.base import (
     AgentExecutor,
@@ -52,6 +60,7 @@ from frutlups_drive.mockverbs import (
 )
 from frutlups_drive.memory_hooks import LlloomMemoryHooks, MemoryHookFact
 from frutlups_drive.oracle import (
+    MAX_ORACLE_INPUT_BYTES,
     OracleRefusal,
     reconcile_pass_boundary,
     rework_protected_artifact,
@@ -82,6 +91,8 @@ from frutlups_drive.verifier import (
 )
 from frutlups_drive.watcher import Watcher
 from frutlups_drive.workspace import (
+    BoundarySnapshotRefusal,
+    RECONCILIATION_PREFIXES,
     WorkspaceLease,
     WorkspaceManager,
     check_fences,
@@ -109,7 +120,9 @@ EVENT_KINDS = (
     "backoff",
     "run_store_control",
     "adoption",
+    "ladder_event",
     "verification",
+    "timeout_classification",
     "fence",
     "reconciliation",
     "pass_boundary",
@@ -118,6 +131,7 @@ EVENT_KINDS = (
     "holistic_finding_unmappable",
     "shadow_review",
     "memory_hook",
+    "architect_corrective_turn",
     "slice_complete",
     "continue_past_frontier",
     "boundary",
@@ -151,11 +165,23 @@ _RECONCILIATION_PROPOSAL = "roadmap_proposal.md"
 _HOLISTIC_REVIEW = "holistic_review.json"
 _SHADOW_REVIEW = "shadow_report.md"
 _OWNER_NOTES_RELATIVE = Path("05_governance/human_owner_notes")
+_REWORK_DECLARATIONS_RELATIVE = Path("05_governance/rework_declarations")
 _MAX_OWNER_NOTES = 1_000
+_MAX_REWORK_DECLARATIONS = 1_000
 _MAX_BOUNDARY_MEMBERS = 20_000
 _SLICE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+_REWORK_PASS_ID = re.compile(r"holistic_pass_(?P<number>[0-9]{3})")
 _MAX_SEAT_CONDUCT_BLOCK_BYTES = 768
 _MAX_REWORK_ENVELOPE_BYTES = 4_096
+_ARCHITECT_CORRECTIVE_PROMPT = "architect_corrective_prompt.md"
+_PROMPT_CONTRACT_FAILURE_CODES = frozenset(
+    {
+        "verb_dry_run_refused",
+        "verb_target_missing",
+        "verb_target_invalid",
+        "verb_target_mismatch",
+    }
+)
 _STOP_JOURNAL_ATTEMPTED = "_frutlups_stop_journal_attempted"
 _REFUSAL_ROUTING_ATTEMPTED = "_frutlups_refusal_routing_attempted"
 _SEAT_CONDUCT_BLOCK = (
@@ -178,6 +204,28 @@ class RoleSeat:
     role: Role
     adapter: str
     model: str
+
+
+@dataclass(frozen=True)
+class _OwnerNoteChange:
+    path: str
+    controlling_sha256: str
+
+
+@dataclass(frozen=True)
+class _DurableRework:
+    artifact: str
+    pass_id: str
+    pass_number: int
+    slice_ids: tuple[str, ...]
+    source_run_id: str
+    source_event_index: int
+
+
+@dataclass(frozen=True)
+class _AdoptionRefusal:
+    code: str
+    attempt_id: str
 
 
 def policy_seat(policy: ExecutionPolicy, role: Role) -> RoleSeat:
@@ -329,6 +377,14 @@ class Supervisor:
             name in inspect.signature(verb_writer.invoke).parameters
             for name in ("pass_id", "rework_slices")
         )
+        corrective_authority = getattr(
+            self._verb_writer, "authorize_corrective_proposal", None
+        )
+        self._corrective_writer = CorrectiveProposalWriter(
+            self._project_root,
+            accepted_target=self._corrective_target_accepted,
+            transaction_authority=corrective_authority,
+        )
         self._owner_snapshot_error: str | None = None
         try:
             if self._store.read_owner_notes_snapshot(self._run_id) is None:
@@ -433,6 +489,17 @@ class Supervisor:
             )
         owner_change = self._owner_note_change()
         if owner_change is not None:
+            if isinstance(owner_change, _OwnerNoteChange):
+                return self._stop(
+                    StopReason.FRESH_RUN_REQUIRED,
+                    f"owner-note admission snapshot changed: {owner_change.path}",
+                    decision=(
+                        f"Review owner-note file '{owner_change.path}', then "
+                        "launch the named fresh lifecycle. Its content was not "
+                        "interpreted."
+                    ),
+                    fresh_run=owner_change,
+                )
             return self._stop(
                 StopReason.OWNER_NOTE,
                 f"owner-note admission snapshot changed: {owner_change}",
@@ -607,8 +674,16 @@ class Supervisor:
         rework_slices: tuple[str, ...] = (),
     ) -> TickResult:
         slice_id = state.frontier.slice_id if state.frontier else ""
-        if slice_id and self._has_any_coder_evidence(slice_id):
-            gate = self._ensure_verified_coder_attempt(slice_id)
+        prompt_write_first = (
+            verb == "make-coding-prompt"
+            and state.step is LoopStep.MAKE_CODING_PROMPT
+        )
+        if (
+            slice_id
+            and not prompt_write_first
+            and self._has_any_coder_evidence(slice_id)
+        ):
+            gate = self._ensure_verified_coder_attempt(slice_id, state)
             if gate is not None:
                 return gate
         if declared is self._DECLARED_FROM_STATE:
@@ -652,6 +727,25 @@ class Supervisor:
             # A governed verb transaction failure is fail-closed provider
             # state with preserved evidence; nothing is retried in-tick.
             self._journal("refusal", code=failed.code)
+            target = (
+                declared
+                if isinstance(declared, str)
+                else getattr(state.artifacts, _VERB_ARTIFACT_FIELDS[verb])
+            )
+            if (
+                verb in ("make-coding-prompt", "make-review-prompt")
+                and failed.code in _PROMPT_CONTRACT_FAILURE_CODES
+                and isinstance(target, str)
+            ):
+                return self._architect_corrective_or_stop(
+                    CorrectiveFailureClass.PROMPT_CONTRACT,
+                    failed.code,
+                    target,
+                    reason=StopReason.PROVIDER_FAILURE,
+                    detail=f"governed verb transaction failed: {failed.code}",
+                    state=state,
+                    slice_id=slice_id,
+                )
             return self._stop(
                 StopReason.PROVIDER_FAILURE,
                 f"governed verb transaction failed: {failed.code}",
@@ -711,11 +805,7 @@ class Supervisor:
         if self._satisfied_coder_attempt(slice_id, frontier_round, prompt_rel):
             return TickResult("acted", "coder_attempt_already_satisfied")
 
-        stop = ladder.check_ladder(
-            frontier_round,
-            self._counters.lifecycle_coder_collected_for(slice_id),
-            self._round4_authority(),
-        )
+        stop = self._check_ladder(frontier_round, slice_id)
         if stop is not None:
             return self._stop(stop, "ladder cap", state=state, slice_id=slice_id)
         exceeded = self._gate.check_coder_dispatch(self._counters, slice_id)
@@ -796,10 +886,8 @@ class Supervisor:
         pending = self._pending_coder_attempt(slice_id)
         if pending is not None:
             return self._finish_coder_attempt(pending, slice_id)
-        stop = ladder.check_ladder(
-            state.frontier.round if state.frontier else 1,
-            self._counters.lifecycle_coder_collected_for(slice_id),
-            self._round4_authority(),
+        stop = self._check_ladder(
+            state.frontier.round if state.frontier else 1, slice_id
         )
         if stop is not None:
             return self._stop(stop, "ladder cap", state=state, slice_id=slice_id)
@@ -826,6 +914,95 @@ class Supervisor:
             expected_rel=(report_rel,),
             repair=False,
             verify_after=True,
+        )
+
+    def _check_ladder(
+        self, frontier_round: int, slice_id: str
+    ) -> StopReason | None:
+        start = 0
+        for index, event in enumerate(self._events):
+            slices = event.get("slices")
+            if (
+                event.get("kind") == "verb"
+                and event.get("verb") == "declare-rework"
+                and isinstance(slices, list)
+                and slice_id in slices
+            ):
+                start = index + 1
+        explicit = [
+            event
+            for event in self._events[start:]
+            if event.get("kind") == "ladder_event"
+            and event.get("slice") == slice_id
+        ]
+        if explicit:
+            key = f"product_finding:{slice_id}"
+            prior = sum(
+                event.get("counted") is True
+                and event.get("failure_class")
+                == LadderFailureClass.PRODUCT_FINDING.value
+                and event.get("recurrence_key") == key
+                for event in explicit
+            )
+            frontier_round = 1
+        else:
+            prior = self._counters.lifecycle_coder_collected_for(slice_id)
+        return ladder.check_ladder(
+            frontier_round, prior, self._round4_authority()
+        )
+
+    @staticmethod
+    def _result_failure_class(result: AgentRunResult) -> LadderFailureClass:
+        if result.status in ("completed", "blocked"):
+            return LadderFailureClass.PRODUCT_FINDING
+        if result.status == "policy_violation":
+            return LadderFailureClass.PATH_CONTRACT
+        if (
+            result.status == "budget_exhausted"
+            or result.exit_reason == "agent_executable_missing"
+        ):
+            return LadderFailureClass.ENVIRONMENT
+        return LadderFailureClass.TRANSPORT
+
+    def _journal_ladder_event(
+        self,
+        attempt: Path,
+        slice_id: str,
+        failure_class: LadderFailureClass,
+    ) -> None:
+        request = self._store.read_request(attempt) or {}
+        if request.get("role") != "coder":
+            return
+        dispatch = next(
+            (
+                event
+                for event in reversed(self._events)
+                if event.get("kind") == "dispatch"
+                and event.get("slice") == slice_id
+                and event.get("attempt") == attempt.name
+            ),
+            None,
+        )
+        if dispatch is None or dispatch.get("repair") is True:
+            return
+        if any(
+            event.get("kind") == "ladder_event"
+            and event.get("slice") == slice_id
+            and event.get("attempt") == attempt.name
+            for event in self._events
+        ):
+            return
+        counted = failure_class is LadderFailureClass.PRODUCT_FINDING
+        recurrence_key = (
+            f"product_finding:{slice_id}" if counted else failure_class.value
+        )
+        self._journal(
+            "ladder_event",
+            slice=slice_id,
+            attempt=attempt.name,
+            failure_class=failure_class.value,
+            recurrence_key=recurrence_key,
+            counted=counted,
         )
 
     def _repair(
@@ -873,7 +1050,7 @@ class Supervisor:
         )
 
     def _execute_review(self, state: PlanningState, slice_id: str) -> TickResult:
-        gate = self._ensure_verified_coder_attempt(slice_id)
+        gate = self._ensure_verified_coder_attempt(slice_id, state)
         if gate is not None:
             return gate
         prompt_rel = state.artifacts.review_prompt
@@ -1064,6 +1241,18 @@ class Supervisor:
             tokens_in=result.tokens_in if result is not None else None,
             tokens_out=result.tokens_out if result is not None else None,
             cost_usd=result.cost_usd if result is not None else None,
+            cost_knowledge=(
+                result.cost_knowledge if result is not None else "unknown"
+            ),
+            provider_duration_seconds=(
+                result.provider_duration_seconds if result is not None else None
+            ),
+            retry_class=(
+                result.retry_class if result is not None else "not_applicable"
+            ),
+            truncated=(
+                result.capture_truncated if result is not None else False
+            ),
         )
         self._advance_transition(attempt, "validated")
         self._advance_transition(attempt, "closed")
@@ -1220,17 +1409,27 @@ class Supervisor:
         prompt: bytes,
         prompt_name: str,
         output_name: str,
+        architect_corrective_turn: bool = False,
+        corrective_fallback: Callable[[], TickResult] | None = None,
     ) -> tuple[Path, Path] | TickResult:
         seat = policy_seat(self._policy, role)
         if seat.adapter in EXTERNAL_ADAPTERS:
             if self._external_dispatch_guard is None:
                 self._journal("refusal", code="live_authority_missing")
-                return TickResult("refused", "live_authority_missing")
+                return (
+                    corrective_fallback()
+                    if corrective_fallback is not None
+                    else TickResult("refused", "live_authority_missing")
+                )
             try:
                 self._external_dispatch_guard()
             except Exception:
                 self._journal("refusal", code="live_authority_changed")
-                return TickResult("refused", "live_authority_changed")
+                return (
+                    corrective_fallback()
+                    if corrective_fallback is not None
+                    else TickResult("refused", "live_authority_changed")
+                )
         attempt = self._store.create_attempt(self._run_id, slice_id)
         prompt_path = self._store.write_attempt_prompt(
             attempt, prompt_name, prompt
@@ -1251,26 +1450,44 @@ class Supervisor:
                 slice_id,
                 repair=False,
                 frontier_round=state.frontier.round if state.frontier else 1,
-            ),
+            )
+            if not architect_corrective_turn
+            else self._role_efforts.get(Role.ARCHITECT.value, ("", ""))[1],
         )
         self._store.write_request(attempt, request)
-        self._journal(
-            "dispatch",
-            role=role.value,
-            slice=slice_id,
-            attempt=attempt.name,
-            repair=False,
-            adapter=request.adapter,
-            model=request.model,
-            effort=request.effort,
-        )
+        dispatch_fields: dict[str, object] = {
+            "role": role.value,
+            "slice": slice_id,
+            "attempt": attempt.name,
+            "repair": False,
+            "adapter": request.adapter,
+            "model": request.model,
+            "effort": request.effort,
+            "call_ceiling_seconds": request.max_seconds,
+            "call_ceiling_source": self._call_ceiling(role, slice_id)[1],
+        }
+        if architect_corrective_turn:
+            dispatch_fields["architect_corrective_turn"] = True
+        self._journal("dispatch", **dispatch_fields)
         self._advance_transition(attempt, "started")
         try:
             result = self._execute(request, attempt)
         except WorkspaceAuthorityDenied as denied:
-            return self._authority_stop(denied, state, slice_id, attempt)
+            if corrective_fallback is None:
+                return self._authority_stop(denied, state, slice_id, attempt)
+            self._journal(
+                "fence",
+                attempt=attempt.name,
+                violations=[
+                    {"code": v.code, "path": v.path} for v in denied.violations
+                ],
+            )
+            self._advance_transition(attempt, "closed")
+            return corrective_fallback()
         except CostAuthorizationExceeded:
             self._advance_transition(attempt, "closed")
+            if corrective_fallback is not None:
+                return corrective_fallback()
             return self._stop(
                 StopReason.BUDGET_EXHAUSTED,
                 "budget:cost_authorization",
@@ -1279,8 +1496,21 @@ class Supervisor:
                 attempt_id=attempt.name,
             )
         if result is None:
-            return TickResult("acted", "provider_failure")
+            return (
+                corrective_fallback()
+                if corrective_fallback is not None
+                else TickResult("acted", "provider_failure")
+            )
         self._collect(attempt, result, role.value, slice_id)
+        if architect_corrective_turn and result.status != "completed":
+            self._advance_transition(attempt, "closed")
+            assert corrective_fallback is not None
+            return corrective_fallback()
+        timeout_stop = self._timeout_result_stop(
+            result, attempt, state, slice_id
+        )
+        if timeout_stop is not None:
+            return timeout_stop
         if result.status != "completed":
             self._advance_transition(attempt, "closed")
             return TickResult("acted", f"attempt_{result.status}")
@@ -1300,6 +1530,9 @@ class Supervisor:
                     slice_id=slice_id,
                     attempt_id=attempt.name,
                 )
+            if corrective_fallback is not None:
+                self._journal("watch_timeout", attempt=attempt.name)
+                return corrective_fallback()
             self._journal("watch_timeout", attempt=attempt.name)
             return TickResult("acted", "watch_timeout")
         output = staging / output_name
@@ -1314,6 +1547,8 @@ class Supervisor:
             or not output.is_file()
         ):
             self._advance_transition(attempt, "closed")
+            if corrective_fallback is not None:
+                return corrective_fallback()
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "staged output shape violated its single-file authority",
@@ -1333,6 +1568,289 @@ class Supervisor:
             },
         )
         return attempt, output
+
+    def _architect_corrective_or_stop(
+        self,
+        failure_class: CorrectiveFailureClass,
+        failure_code: str,
+        target: str,
+        *,
+        reason: StopReason,
+        detail: str,
+        state: PlanningState,
+        slice_id: str = "",
+        attempt_id: str = "",
+        decision: str = "",
+    ) -> TickResult:
+        def original_stop() -> TickResult:
+            return self._stop(
+                reason,
+                detail,
+                state=state,
+                slice_id=slice_id,
+                attempt_id=attempt_id,
+                decision=decision,
+            )
+
+        if not self._policy.architect_corrective_turn_enabled:
+            return original_stop()
+        target_path = _contained_project_path(self._project_root, target)
+        if target_path is None:
+            return original_stop()
+        trigger_key = hashlib.sha256(
+            json.dumps(
+                {
+                    "failure_class": failure_class.value,
+                    "failure_code": failure_code,
+                    "slice": slice_id,
+                    "target": target,
+                },
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        if any(
+            event.get("kind") == "architect_corrective_turn"
+            and event.get("phase") == "selected"
+            and event.get("trigger_key") == trigger_key
+            for event in self._events
+        ):
+            return original_stop()
+        cap = self._gate.check_architect_corrective_turn(self._counters)
+        if cap is not None:
+            self._journal(
+                "architect_corrective_turn",
+                phase="cap_refused",
+                failure_class=failure_class.value,
+                failure_code=failure_code,
+                target=target,
+                slice=slice_id,
+                budget_meter=cap[1],
+            )
+            return original_stop()
+        try:
+            if target_path.exists():
+                artifact = _bounded_workspace_file(
+                    self._project_root, target, MAX_CORRECTIVE_PROPOSAL_BYTES
+                ).decode("utf-8")
+                artifact_state = "present"
+            else:
+                artifact = ""
+                artifact_state = "absent"
+        except (OSError, UnicodeDecodeError, ValueError):
+            return original_stop()
+        prompt = (
+            "# Architect Corrective Turn\n\n"
+            "Produce exactly one JSON proposal named "
+            f"`{CORRECTIVE_PROPOSAL_NAME}` in the assigned staging workspace. "
+            "Create no other path. The JSON object must have exactly "
+            "`contract_version`, `target`, and `content`; contract_version is "
+            "1, target is the exact failing artifact path below, and content "
+            "is the complete UTF-8 replacement or creation text. Do not edit "
+            "the project directly. Do not propose a roadmap, register, review, "
+            "verdict, accepted artifact, governance-adjacent artifact, or any "
+            "`*.slices.yaml` sidecar. The guarded writer may apply only the "
+            "one exact declared target. Preserve scope and all accepted history.\n\n"
+            "## Typed Failure\n\n"
+            f"- class: `{failure_class.value}`\n"
+            f"- code: `{failure_code}`\n"
+            f"- target: `{target}`\n"
+            f"- artifact_state: `{artifact_state}`\n\n"
+            "## Governing Contract Excerpt\n\n"
+            "The architect supplies one bounded proposal. The drive performs "
+            "only structural validation and the released-frutlups target "
+            "dry-run; semantic prompt validation is not drive authority. A "
+            "valid proposal touches only the failing artifact's exact path. "
+            "Any invalid, extra, accepted-history, or sidecar target is refused "
+            "and the original governed stop remains authoritative.\n\n"
+            "## Failing Artifact (JSON string)\n\n"
+            + json.dumps(artifact, ensure_ascii=True)
+            + "\n"
+        ).encode("utf-8")
+        if len(prompt) > MAX_CORRECTIVE_PROPOSAL_BYTES:
+            return original_stop()
+        self._journal(
+            "architect_corrective_turn",
+            phase="selected",
+            failure_class=failure_class.value,
+            failure_code=failure_code,
+            target=target,
+            slice=slice_id,
+            trigger_key=trigger_key,
+        )
+        staged = self._dispatch_staged_output(
+            state,
+            slice_id,
+            role=Role.ARCHITECT,
+            prompt=prompt,
+            prompt_name=_ARCHITECT_CORRECTIVE_PROMPT,
+            output_name=CORRECTIVE_PROPOSAL_NAME,
+            architect_corrective_turn=True,
+            corrective_fallback=original_stop,
+        )
+        if isinstance(staged, TickResult):
+            return staged
+        attempt, proposal_path = staged
+        evidence_path = proposal_path.relative_to(self._store.root).as_posix()
+        try:
+            proposal_sha256 = _bounded_file_sha256(
+                proposal_path, MAX_CORRECTIVE_PROPOSAL_BYTES
+            )
+        except (OSError, ValueError):
+            self._advance_transition(attempt, "closed")
+            return original_stop()
+        self._journal(
+            "architect_corrective_turn",
+            phase="proposal",
+            failure_class=failure_class.value,
+            failure_code=failure_code,
+            target=target,
+            slice=slice_id,
+            attempt=attempt.name,
+            proposal_sha256=proposal_sha256,
+            evidence_path=evidence_path,
+        )
+        try:
+            proposal = self._corrective_writer.validate(
+                proposal_path,
+                expected_target=target,
+                failure_class=failure_class,
+            )
+        except CorrectiveProposalRefusal as refusal:
+            self._journal(
+                "architect_corrective_turn",
+                phase="validation",
+                failure_class=failure_class.value,
+                failure_code=failure_code,
+                target=target,
+                slice=slice_id,
+                attempt=attempt.name,
+                proposal_sha256=proposal_sha256,
+                evidence_path=evidence_path,
+                valid=False,
+                refusal_code=refusal.code,
+            )
+            self._advance_transition(attempt, "closed")
+            return original_stop()
+        self._journal(
+            "architect_corrective_turn",
+            phase="validation",
+            failure_class=failure_class.value,
+            failure_code=failure_code,
+            target=target,
+            slice=slice_id,
+            attempt=attempt.name,
+            proposal_sha256=proposal.proposal_sha256,
+            evidence_path=evidence_path,
+            valid=True,
+        )
+        try:
+            applied = self._corrective_writer.apply(proposal)
+        except CorrectiveProposalRefusal as refusal:
+            self._journal(
+                "architect_corrective_turn",
+                phase="application",
+                failure_class=failure_class.value,
+                failure_code=failure_code,
+                target=target,
+                slice=slice_id,
+                attempt=attempt.name,
+                proposal_sha256=proposal.proposal_sha256,
+                evidence_path=evidence_path,
+                applied=False,
+                refusal_code=refusal.code,
+            )
+            self._advance_transition(attempt, "closed")
+            return original_stop()
+        self._journal(
+            "architect_corrective_turn",
+            phase="application",
+            failure_class=failure_class.value,
+            failure_code=failure_code,
+            target=applied.target,
+            slice=slice_id,
+            attempt=attempt.name,
+            proposal_sha256=proposal.proposal_sha256,
+            evidence_path=evidence_path,
+            before_sha256=applied.before_sha256,
+            after_sha256=applied.after_sha256,
+            applied=True,
+        )
+        self._advance_transition(attempt, "validated")
+        self._advance_transition(attempt, "closed")
+        return TickResult("acted", "architect_corrective_turn_applied")
+
+    def _corrective_target_accepted(self, target: str) -> bool:
+        for run_id in self._store.list_runs():
+            boundary = self._validated_boundary_lineage(run_id)
+            if boundary is not None:
+                record = boundary[0]
+                if any(
+                    member.get("path") == target
+                    for family in ("evidence", "artifacts")
+                    for member in record[family]
+                    if isinstance(member, dict)
+                ):
+                    return True
+            events = (
+                self._events
+                if run_id == self._run_id
+                else list(self._store.read_events(run_id))
+            )
+            for index, event in enumerate(events):
+                if (
+                    event.get("kind") != "verb"
+                    or event.get("verb") != "record-verdict"
+                ):
+                    continue
+                slice_id = event.get("slice")
+                if any(
+                    prior.get("kind") == "verb"
+                    and prior.get("verb") == "make-coding-prompt"
+                    and prior.get("slice") == slice_id
+                    and prior.get("artifact") == target
+                    for prior in events[:index]
+                ):
+                    return True
+        return False
+
+    def _corrective_escalation_summary(self, slice_id: str) -> str:
+        events = [
+            event
+            for event in self._events
+            if event.get("kind") == "architect_corrective_turn"
+            and (not slice_id or event.get("slice") == slice_id)
+        ]
+        if not events:
+            return ""
+        selected = next(
+            (event for event in reversed(events) if event.get("phase") == "selected"),
+            events[-1],
+        )
+        evidence = next(
+            (
+                event.get("evidence_path")
+                for event in reversed(events)
+                if isinstance(event.get("evidence_path"), str)
+            ),
+            "unavailable_before_staging",
+        )
+        terminal = events[-1]
+        disposition = (
+            "applied"
+            if terminal.get("applied") is True
+            else str(terminal.get("refusal_code") or terminal.get("phase"))
+        )
+        return (
+            "Architect Corrective Turn\n"
+            f"attempted: yes\n"
+            f"failure_class: {selected.get('failure_class', '')}\n"
+            f"failure_code: {selected.get('failure_code', '')}\n"
+            f"target: {selected.get('target', '')}\n"
+            f"evidence: {evidence}\n"
+            f"disposition: {disposition}"
+        )
 
     def _reconciliation_post_read(
         self, prior: PlanningState, slice_id: str, attempt_id: str
@@ -1442,14 +1960,12 @@ class Supervisor:
                     max_members=_MAX_BOUNDARY_MEMBERS,
                     max_file_bytes=self._policy.limits.max_run_store_bytes,
                 )
-                artifacts = tuple(
-                    {"path": path, "sha256": digest}
-                    for path, digest in sorted(
-                        self._workspace.snapshot(self._project_root).items()
-                    )
+                artifacts = self._workspace.pass_boundary_snapshot(
+                    self._project_root,
+                    exclusion_manifest=self._policy.oracle_exclusion_manifest,
+                    max_file_bytes=MAX_ORACLE_INPUT_BYTES,
+                    max_members=_MAX_BOUNDARY_MEMBERS,
                 )
-                if len(artifacts) > _MAX_BOUNDARY_MEMBERS:
-                    raise ValueError("artifact inventory exceeds its bound")
                 record = {
                     "contract_version": 1,
                     "run_id": self._run_id,
@@ -1457,6 +1973,18 @@ class Supervisor:
                     "artifacts": list(artifacts),
                 }
                 path = self._store.write_pass_boundary(self._run_id, record)
+            except BoundarySnapshotRefusal as refusal:
+                return self._stop(
+                    StopReason.INVALID_STATE,
+                    f"{refusal.code}: {refusal.message}",
+                    state=state,
+                    decision=(
+                        "Review the named workspace paths and sizes. Declare "
+                        "only intentional local outputs through the documented "
+                        "oracle exclusion manifest, or remove them; then retry "
+                        "the pass boundary."
+                    ),
+                )
             except (OSError, RunStoreRefusal, ValueError):
                 return self._stop(
                     StopReason.RUN_STORE_FULL,
@@ -1767,6 +2295,147 @@ class Supervisor:
             return TickResult("boundary", "complete")
         return TickResult("acted", "clean_pass")
 
+    def _validated_boundary_lineage(
+        self, run_id: str
+    ) -> tuple[dict, str, int] | None:
+        try:
+            record = self._store.read_pass_boundary(run_id)
+            path = self._store.run_dir(run_id) / "pass_boundary.json"
+            digest = _bounded_file_sha256(
+                path, self._policy.limits.max_run_store_bytes
+            )
+            events = self._store.read_events(run_id)
+        except (OSError, UnicodeDecodeError, ValueError, RunStoreRefusal):
+            return None
+        if not _valid_pass_boundary_record(record, run_id):
+            return None
+        matches = [
+            index
+            for index, event in enumerate(events)
+            if event.get("kind") == "pass_boundary"
+            and event.get("evidence_sha256") == digest
+            and event.get("evidence_members") == len(record["evidence"])
+            and event.get("artifact_members") == len(record["artifacts"])
+        ]
+        if len(matches) != 1:
+            return None
+        return record, digest, matches[0]
+
+    def _rework_contract_records(
+        self,
+    ) -> tuple[tuple[int, str, str, int, tuple[str, ...]], ...]:
+        directory = self._project_root / _REWORK_DECLARATIONS_RELATIVE
+        if not directory.exists():
+            return ()
+        if directory.is_symlink() or _is_junction(directory) or not directory.is_dir():
+            return ()
+        try:
+            entries = tuple(sorted(directory.iterdir(), key=lambda item: item.name))
+        except OSError:
+            return ()
+        if len(entries) > _MAX_REWORK_DECLARATIONS:
+            return ()
+        records: list[tuple[int, str, str, int, tuple[str, ...]]] = []
+        seen_sequences: set[int] = set()
+        for path in entries:
+            if path.suffix != ".json" or path.is_symlink() or not path.is_file():
+                continue
+            try:
+                data = _bounded_workspace_file(
+                    self._project_root,
+                    path.relative_to(self._project_root).as_posix(),
+                    self._policy.limits.max_run_store_bytes,
+                )
+                payload = json.loads(data.decode("utf-8"))
+                sequence, pass_id, pass_number, slice_ids = (
+                    _checked_rework_declaration(payload)
+                )
+            except (OSError, UnicodeDecodeError, ValueError):
+                continue
+            if sequence in seen_sequences:
+                continue
+            seen_sequences.add(sequence)
+            artifact = path.relative_to(self._project_root).as_posix()
+            records.append((sequence, artifact, pass_id, pass_number, slice_ids))
+        return tuple(sorted(records, key=lambda item: item[0]))
+
+    def _durable_reworks(self) -> tuple[_DurableRework, ...]:
+        runs = self._store.list_runs()
+        records: list[tuple[int, _DurableRework]] = []
+        for sequence, artifact, pass_id, pass_number, slice_ids in (
+            self._rework_contract_records()
+        ):
+            sources: list[tuple[str, int]] = []
+            for run_id in runs:
+                boundary = self._validated_boundary_lineage(run_id)
+                if boundary is None:
+                    continue
+                _, _, boundary_index = boundary
+                try:
+                    events = self._store.read_events(run_id)
+                except RunStoreRefusal:
+                    continue
+                for index, event in enumerate(events):
+                    if (
+                        index > boundary_index
+                        and event.get("kind") == "verb"
+                        and event.get("verb") == "declare-rework"
+                        and event.get("artifact") == artifact
+                        and event.get("pass_id") == pass_id
+                        and event.get("slices") == list(slice_ids)
+                    ):
+                        sources.append((run_id, index))
+            if len(sources) != 1:
+                continue
+            source_run_id, source_event_index = sources[0]
+            records.append(
+                (
+                    sequence,
+                    _DurableRework(
+                        artifact,
+                        pass_id,
+                        pass_number,
+                        slice_ids,
+                        source_run_id,
+                        source_event_index,
+                    ),
+                )
+            )
+        return tuple(item for _, item in sorted(records, key=lambda item: item[0]))
+
+    def _durable_rework_missing(
+        self, declaration: _DurableRework
+    ) -> tuple[str, ...]:
+        completed: set[str] = set()
+        started = False
+        for run_id in self._store.list_runs():
+            if run_id == declaration.source_run_id:
+                started = True
+            if not started:
+                continue
+            events = (
+                self._events
+                if run_id == self._run_id
+                else list(self._store.read_events(run_id))
+            )
+            start = (
+                declaration.source_event_index + 1
+                if run_id == declaration.source_run_id
+                else 0
+            )
+            completed.update(
+                str(event.get("slice"))
+                for event in events[start:]
+                if event.get("kind") == "slice_complete"
+                or (
+                    event.get("kind") == "verb"
+                    and event.get("verb") == "record-verdict"
+                    and isinstance(event.get("slice"), str)
+                    and bool(event.get("slice"))
+                )
+            )
+        return tuple(item for item in declaration.slice_ids if item not in completed)
+
     def _active_worklist(self) -> tuple[int, int, tuple[str, ...]] | None:
         for index in range(len(self._events) - 1, -1, -1):
             event = self._events[index]
@@ -1781,7 +2450,11 @@ class Supervisor:
                 and pass_number > 0
             ):
                 return index, pass_number, tuple(str(item) for item in findings)
-            return None
+            break
+        for declaration in reversed(self._durable_reworks()):
+            missing = self._durable_rework_missing(declaration)
+            if missing:
+                return -1, declaration.pass_number, missing
         return None
 
     def _missing_worklist_slices(self) -> tuple[str, ...]:
@@ -1805,6 +2478,16 @@ class Supervisor:
     def _check_active_worklist(self, state: PlanningState) -> TickResult | None:
         validated = self._validated_active_worklist()
         if validated is None:
+            slice_id = state.frontier.slice_id if state.frontier else ""
+            bound = {declaration.artifact for declaration in self._durable_reworks()}
+            for _, artifact, _, pass_number, slice_ids in reversed(
+                self._rework_contract_records()
+            ):
+                if artifact not in bound and slice_id in slice_ids:
+                    self._journal_unmappable_findings(pass_number, (slice_id,))
+                    return self._unmappable_findings_stop(
+                        state, pass_number, (slice_id,), artifact=artifact
+                    )
             return None
         _, pass_number, findings, unmappable = validated
         self._journal_unmappable_findings(pass_number, unmappable)
@@ -1829,9 +2512,10 @@ class Supervisor:
         if active is None:
             return None
         index, pass_number, findings = active
+        current_events = self._events[:index] if index >= 0 else self._events
         reopenable = {
             str(event.get("slice"))
-            for event in self._events[:index]
+            for event in current_events
             if (
                 event.get("kind") == "slice_complete"
                 or (
@@ -1842,6 +2526,11 @@ class Supervisor:
             and isinstance(event.get("slice"), str)
             and bool(event.get("slice"))
         }
+        reopenable.update(
+            slice_id
+            for declaration in self._durable_reworks()
+            for slice_id in declaration.slice_ids
+        )
         valid: list[str] = []
         unmappable: list[str] = []
         seen_valid: set[str] = set()
@@ -1882,17 +2571,32 @@ class Supervisor:
         state: PlanningState,
         pass_number: int,
         finding_ids: tuple[str, ...],
+        *,
+        artifact: str | None = None,
     ) -> TickResult:
         pass_id = f"holistic_pass_{pass_number:03d}"
         listed = ", ".join(f"`{finding_id}`" for finding_id in finding_ids)
+        detail = f"{pass_id} has findings but no reopenable slice ids"
+        decision = (
+            f"Human adjudication is required for {pass_id}. Its "
+            f"unmappable finding ids, in reported order, are: {listed}."
+        )
+        if artifact is not None:
+            return self._architect_corrective_or_stop(
+                CorrectiveFailureClass.REWORK_DECLARATION_MAPPING,
+                "rework_declaration_lineage_unmappable",
+                artifact,
+                reason=StopReason.HOLISTIC_FINDINGS_UNMAPPABLE,
+                detail=detail,
+                state=state,
+                slice_id=(state.frontier.slice_id if state.frontier else ""),
+                decision=decision,
+            )
         return self._stop(
             StopReason.HOLISTIC_FINDINGS_UNMAPPABLE,
-            f"{pass_id} has findings but no reopenable slice ids",
+            detail,
             state=state,
-            decision=(
-                f"Human adjudication is required for {pass_id}. Its "
-                f"unmappable finding ids, in reported order, are: {listed}."
-            ),
+            decision=decision,
         )
 
     def _owner_notes_snapshot(self) -> dict[str, object]:
@@ -1920,7 +2624,7 @@ class Supervisor:
                 )
         return {"contract_version": 1, "files": files}
 
-    def _owner_note_change(self) -> str | None:
+    def _owner_note_change(self) -> _OwnerNoteChange | str | None:
         if self._owner_snapshot_error is not None:
             return self._owner_snapshot_error
         try:
@@ -1941,7 +2645,13 @@ class Supervisor:
         changed = sorted(
             name for name in set(before) | set(after) if before.get(name) != after.get(name)
         )
-        return changed[0] if changed else None
+        if not changed:
+            return None
+        path = changed[0]
+        controlling = after.get(path, before.get(path))
+        if not _sha256_text(controlling):
+            return "owner_notes_snapshot_invalid"
+        return _OwnerNoteChange(path, str(controlling))
 
     # ------------------------------------------------------------ dispatches
 
@@ -2032,6 +2742,8 @@ class Supervisor:
             "adapter": request.adapter,
             "model": request.model,
             "effort": request.effort,
+            "call_ceiling_seconds": request.max_seconds,
+            "call_ceiling_source": self._call_ceiling(role, slice_id)[1],
         }
         if prompt_source_sha256 is not None:
             dispatch_fields["prompt_source"] = prompt_rel
@@ -2044,6 +2756,9 @@ class Supervisor:
         except WorkspaceAuthorityDenied as denied:
             return self._authority_stop(denied, state, slice_id, attempt)
         except CostAuthorizationExceeded:
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.ENVIRONMENT
+            )
             self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.BUDGET_EXHAUSTED,
@@ -2053,10 +2768,18 @@ class Supervisor:
                 attempt_id=attempt.name,
             )
         if result is None:
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.TRANSPORT
+            )
             return TickResult("acted", "provider_failure")
 
         if result.status != "completed":
             self._collect(attempt, result, role.value, slice_id)
+            timeout_stop = self._timeout_result_stop(
+                result, attempt, state, slice_id
+            )
+            if timeout_stop is not None:
+                return timeout_stop
             violations = self._rework_snapshot_violations(
                 lease.root, rework_snapshot
             )
@@ -2064,6 +2787,9 @@ class Supervisor:
                 return self._rework_path_stop(
                     state, slice_id, attempt, violations
                 )
+            self._journal_ladder_event(
+                attempt, slice_id, self._result_failure_class(result)
+            )
             self._advance_transition(attempt, "closed")
             return TickResult("acted", f"attempt_{result.status}")
 
@@ -2088,6 +2814,11 @@ class Supervisor:
         )
         if not watch.ok:
             if watch.stop_requested:
+                self._journal_ladder_event(
+                    attempt,
+                    slice_id,
+                    LadderFailureClass.OPERATOR_KILL_SWITCH,
+                )
                 self._advance_transition(attempt, "closed")
                 return self._stop(
                     StopReason.KILL_SWITCH,
@@ -2105,6 +2836,9 @@ class Supervisor:
                     state, slice_id, attempt, violations
                 )
             self._journal("watch_timeout", attempt=attempt.name)
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.TRANSPORT
+            )
             self._advance_transition(attempt, "closed")
             return TickResult("acted", "watch_timeout")
 
@@ -2139,6 +2873,9 @@ class Supervisor:
                 ],
             )
             self._advance_transition(attempt, "closed")
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.PATH_CONTRACT
+            )
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "attempt violated its workspace authority fence",
@@ -2151,6 +2888,9 @@ class Supervisor:
             verified = self._run_verification(attempt, lease, slice_id)
             if isinstance(verified, TickResult):
                 return verified
+        self._journal_ladder_event(
+            attempt, slice_id, LadderFailureClass.PRODUCT_FINDING
+        )
         self._advance_transition(attempt, "validated")
         self._advance_transition(attempt, "closed")
         return TickResult("acted", f"{role.value}_attempt_completed")
@@ -2167,7 +2907,24 @@ class Supervisor:
                 and slice_id in slices
             ):
                 return True
-        return False
+        return any(
+            slice_id in declaration.slice_ids
+            for declaration in self._durable_reworks()
+        )
+
+    def _rework_boundary_source(self, slice_id: str) -> str | None:
+        if any(
+            event.get("kind") == "verb"
+            and event.get("verb") == "declare-rework"
+            and isinstance(event.get("slices"), list)
+            and slice_id in event["slices"]
+            for event in self._events
+        ):
+            return self._run_id
+        for declaration in reversed(self._durable_reworks()):
+            if slice_id in declaration.slice_ids:
+                return declaration.source_run_id
+        return None
 
     def _prepare_rework_turn(
         self,
@@ -2179,11 +2936,13 @@ class Supervisor:
     ) -> tuple[dict, bytes] | TickResult:
         """Authenticate the frozen boundary and snapshot protected members."""
 
-        try:
-            record = self._store.read_pass_boundary(self._run_id)
-        except (OSError, UnicodeDecodeError, ValueError, RunStoreRefusal):
-            record = None
-        if not _valid_pass_boundary_record(record, self._run_id):
+        boundary_run_id = self._rework_boundary_source(slice_id)
+        lineage = (
+            self._validated_boundary_lineage(boundary_run_id)
+            if boundary_run_id is not None
+            else None
+        )
+        if lineage is None:
             self._advance_transition(attempt, "closed")
             return self._stop(
                 StopReason.INVALID_STATE,
@@ -2192,40 +2951,7 @@ class Supervisor:
                 slice_id=slice_id,
                 attempt_id=attempt.name,
             )
-
-        boundary_path = self._store.run_dir(self._run_id) / "pass_boundary.json"
-        try:
-            boundary_sha256 = _bounded_file_sha256(
-                boundary_path, self._policy.limits.max_run_store_bytes
-            )
-        except (OSError, ValueError):
-            self._advance_transition(attempt, "closed")
-            return self._stop(
-                StopReason.INVALID_STATE,
-                "rework pass-boundary manifest is missing or over-bound",
-                state=state,
-                slice_id=slice_id,
-                attempt_id=attempt.name,
-            )
-        boundary_events = [
-            event for event in self._events if event.get("kind") == "pass_boundary"
-        ]
-        if (
-            len(boundary_events) != 1
-            or boundary_events[0].get("evidence_sha256") != boundary_sha256
-            or boundary_events[0].get("evidence_members")
-            != len(record["evidence"])
-            or boundary_events[0].get("artifact_members")
-            != len(record["artifacts"])
-        ):
-            self._advance_transition(attempt, "closed")
-            return self._stop(
-                StopReason.INVALID_STATE,
-                "rework pass-boundary manifest does not match its durable fact",
-                state=state,
-                slice_id=slice_id,
-                attempt_id=attempt.name,
-            )
+        record, boundary_sha256, _ = lineage
 
         frozen: dict[str, bytes] = {}
         frozen_total = 0
@@ -2328,6 +3054,9 @@ class Supervisor:
         self._journal(
             "fence", attempt=attempt.name, violations=violations
         )
+        self._journal_ladder_event(
+            attempt, slice_id, LadderFailureClass.PATH_CONTRACT
+        )
         if self._store.read_transition(attempt) != "closed":
             self._advance_transition(attempt, "closed")
         members = "\n".join(
@@ -2383,6 +3112,7 @@ class Supervisor:
             )
         if self._max_call_cost_usd is not None:
             remaining_cost = min(remaining_cost, self._max_call_cost_usd)
+        call_ceiling, _ = self._call_ceiling(role, attempt.parent.name)
         return AgentRunRequest(
             run_id=self._run_id,
             attempt_id=attempt.name,
@@ -2398,8 +3128,18 @@ class Supervisor:
             if access in ("read_only", "workspace_write")
             else "read_only",
             expected_artifacts=tuple(Path(rel) for rel in expected_rel),
-            max_seconds=max(1, int(self._watch_timeout)),
+            max_seconds=max(1, int(call_ceiling)),
             max_cost_usd=remaining_cost,
+        )
+
+    def _call_ceiling(self, role: Role, slice_id: str) -> tuple[float, str]:
+        declared, source = self._policy.dispatch.call_ceiling(
+            role.value, slice_id
+        )
+        return (
+            (float(declared), source)
+            if declared is not None
+            else (float(self._watch_timeout), "global")
         )
 
     def _effort_for_dispatch(
@@ -2450,6 +3190,9 @@ class Supervisor:
                 {"code": v.code, "path": v.path} for v in denied.violations
             ],
         )
+        self._journal_ladder_event(
+            attempt, slice_id, LadderFailureClass.PATH_CONTRACT
+        )
         self._advance_transition(attempt, "closed")
         return self._stop(
             StopReason.PATH_VIOLATION,
@@ -2476,16 +3219,92 @@ class Supervisor:
                 slice=slice_id,
                 status=result.status,
                 cost_usd=result.cost_usd,
+                cost_knowledge=result.cost_knowledge,
+                tokens_in=result.tokens_in,
+                tokens_out=result.tokens_out,
+                provider_duration_seconds=result.provider_duration_seconds,
+                observed_duration_seconds=result.observed_duration_seconds,
+                retry_class=result.retry_class,
+                truncated=result.capture_truncated,
             )
+
+    def _timeout_result_stop(
+        self,
+        result: AgentRunResult,
+        attempt: Path,
+        state: PlanningState | None,
+        slice_id: str,
+    ) -> TickResult | None:
+        if result.status != "timeout":
+            return None
+        request = self._store.read_request(attempt) or {}
+        ceiling = request.get("max_seconds")
+        measured = (
+            result.observed_duration_seconds
+            if result.observed_duration_seconds is not None
+            else result.provider_duration_seconds
+        )
+        self._journal(
+            "timeout_classification",
+            attempt=attempt.name,
+            slice=slice_id,
+            timeout_class=result.retry_class,
+            measured_duration_seconds=measured,
+            ceiling_seconds=ceiling,
+            retry_disposition=(
+                "same_envelope_refused"
+                if result.retry_class == "scientific_subprocess_running"
+                else "policy_retry_eligible"
+            ),
+        )
+        if result.retry_class != "scientific_subprocess_running":
+            return None
+        self._journal_ladder_event(
+            attempt, slice_id, LadderFailureClass.TRANSPORT
+        )
+        self._advance_transition(attempt, "closed")
+        measured_text = "unknown" if measured is None else f"{float(measured):.6g}"
+        ceiling_text = "unknown" if ceiling is None else f"{float(ceiling):.6g}"
+        return self._stop(
+            StopReason.BUDGET_EXHAUSTED,
+            "same_envelope_retry_refused: timeout_class="
+            "scientific_subprocess_running, measured_duration_seconds="
+            f"{measured_text}, ceiling_seconds={ceiling_text}",
+            state=state,
+            slice_id=slice_id,
+            attempt_id=attempt.name,
+        )
 
     # -------------------------------------------------------- verification
 
     def _run_verification(
         self, attempt: Path, lease, slice_id: str
     ) -> TickResult | None:
-        recorded = self._verification_event(slice_id, attempt.name)
+        recorded = self._verification_event_record(slice_id, attempt.name)
         if recorded is not None:
-            return None if recorded else self._verification_failed_result(attempt)
+            if bool(recorded.get("passed")):
+                return None
+            if recorded.get("timeout_class") == "scientific_subprocess_budget":
+                self._advance_transition(attempt, "closed")
+                return self._scientific_timeout_stop(
+                    attempt,
+                    slice_id,
+                    recorded.get("measured_duration_seconds"),
+                    recorded.get("ceiling_seconds"),
+                )
+            try:
+                failure_class = LadderFailureClass(
+                    str(
+                        recorded.get(
+                            "failure_class",
+                            LadderFailureClass.PRODUCT_FINDING.value,
+                        )
+                    )
+                )
+            except ValueError:
+                failure_class = LadderFailureClass.PRODUCT_FINDING
+            self._journal_ladder_event(attempt, slice_id, failure_class)
+            return self._verification_failed_result(attempt)
         evidence_dir = attempt / "verification"
         if evidence_dir.exists():
             self._journal(
@@ -2493,43 +3312,198 @@ class Supervisor:
                 attempt=attempt.name,
                 violations=[{"code": "fake_evidence", "path": "verification"}],
             )
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.PATH_CONTRACT
+            )
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "verification evidence existed before the verifier ran",
                 slice_id=slice_id,
                 attempt_id=attempt.name,
             )
+        plan = self._verification_plan
+        scientific_budget = (
+            self._policy.dispatch.scientific_subprocess_budget_seconds
+        )
+        if scientific_budget is not None:
+            plan = VerificationPlan(
+                commands=tuple(
+                    replace(
+                        command,
+                        timeout_seconds=min(
+                            command.timeout_seconds, scientific_budget
+                        ),
+                    )
+                    for command in plan.commands
+                ),
+                declared_regenerated=plan.declared_regenerated,
+            )
         try:
             outcome = self._verifier.verify(
                 attempt,
-                self._verification_plan,
+                plan,
                 lease.root,
                 base_revision=lease.base_revision,
                 final_revision_reader=lambda: self._workspace.revision(lease.root),
             )
         except RunStoreRefusal:
+            self._journal_ladder_event(
+                attempt, slice_id, LadderFailureClass.PATH_CONTRACT
+            )
             return self._stop(
                 StopReason.PATH_VIOLATION,
                 "verification evidence could not be published safely",
                 slice_id=slice_id,
                 attempt_id=attempt.name,
             )
-        self._journal(
-            "verification",
-            attempt=attempt.name,
-            slice=slice_id,
-            passed=outcome.passed,
-            evidence_sha256=outcome.evidence_sha256,
-        )
+        verification_fields: dict[str, object] = {
+            "attempt": attempt.name,
+            "slice": slice_id,
+            "passed": outcome.passed,
+            "evidence_sha256": outcome.evidence_sha256,
+        }
+        if outcome.failure_class is not None:
+            verification_fields["failure_class"] = outcome.failure_class.value
+        if outcome.timed_out:
+            verification_fields.update(
+                {
+                    "timeout_class": (
+                        "scientific_subprocess_budget"
+                        if scientific_budget is not None
+                        else "verification_command_timeout"
+                    ),
+                    "measured_duration_seconds": outcome.measured_duration_seconds,
+                    "ceiling_seconds": outcome.ceiling_seconds,
+                    "retry_disposition": (
+                        "same_envelope_refused"
+                        if scientific_budget is not None
+                        else "policy_retry_eligible"
+                    ),
+                }
+            )
+        self._journal("verification", **verification_fields)
         if not outcome.passed:
+            self._journal_ladder_event(
+                attempt,
+                slice_id,
+                outcome.failure_class or LadderFailureClass.PRODUCT_FINDING,
+            )
+            if outcome.timed_out and scientific_budget is not None:
+                self._advance_transition(attempt, "closed")
+                return self._scientific_timeout_stop(
+                    attempt,
+                    slice_id,
+                    outcome.measured_duration_seconds,
+                    outcome.ceiling_seconds,
+                )
             return self._verification_failed_result(attempt)
         return None
+
+    def _scientific_timeout_stop(
+        self,
+        attempt: Path,
+        slice_id: str,
+        measured: object,
+        ceiling: object,
+    ) -> TickResult:
+        measured_text = (
+            f"{float(measured):.6g}"
+            if type(measured) in (int, float)
+            else "unknown"
+        )
+        ceiling_text = (
+            f"{float(ceiling):.6g}"
+            if type(ceiling) in (int, float)
+            else "unknown"
+        )
+        return self._stop(
+            StopReason.BUDGET_EXHAUSTED,
+            "same_envelope_retry_refused: timeout_class="
+            "scientific_subprocess_budget, measured_duration_seconds="
+            f"{measured_text}, ceiling_seconds={ceiling_text}",
+            slice_id=slice_id,
+            attempt_id=attempt.name,
+        )
 
     def _verification_failed_result(self, attempt: Path) -> TickResult:
         self._advance_transition(attempt, "closed")
         return TickResult("acted", "verification_failed")
 
-    def _ensure_verified_coder_attempt(self, slice_id: str) -> TickResult | None:
+    def _adoption_context(
+        self, slice_id: str, state: PlanningState
+    ) -> tuple[str, str, tuple[str, ...]] | None:
+        prompt_rel = state.artifacts.coding_prompt
+        report_rel = state.artifacts.self_report
+        if not prompt_rel or not report_rel:
+            return None
+        prompt = _contained_project_path(self._project_root, prompt_rel)
+        if prompt is None or not prompt.is_file():
+            return None
+        try:
+            prompt_sha256 = _bounded_file_sha256(
+                prompt, self._policy.limits.max_run_store_bytes
+            )
+        except (OSError, ValueError):
+            return None
+        if self._declared_rework(slice_id) and not self._declaration_qualifies_prompt(
+            slice_id, prompt_rel
+        ):
+            return None
+        return prompt_rel, prompt_sha256, (report_rel,)
+
+    def _declaration_qualifies_prompt(
+        self, slice_id: str, prompt_rel: str
+    ) -> bool:
+        current_start = 0
+        for index, event in enumerate(self._events):
+            if (
+                event.get("kind") == "verb"
+                and event.get("verb") == "declare-rework"
+                and isinstance(event.get("slices"), list)
+                and slice_id in event["slices"]
+            ):
+                current_start = index + 1
+        if any(
+            event.get("kind") == "verb"
+            and event.get("verb") == "make-coding-prompt"
+            and event.get("slice") == slice_id
+            and event.get("artifact") == prompt_rel
+            for event in self._events[current_start:]
+        ):
+            return True
+        runs = self._store.list_runs()
+        for declaration in reversed(self._durable_reworks()):
+            if slice_id not in declaration.slice_ids:
+                continue
+            started = False
+            for run_id in runs:
+                if run_id == declaration.source_run_id:
+                    started = True
+                if not started:
+                    continue
+                events = (
+                    self._events
+                    if run_id == self._run_id
+                    else list(self._store.read_events(run_id))
+                )
+                start = (
+                    declaration.source_event_index + 1
+                    if run_id == declaration.source_run_id
+                    else 0
+                )
+                if any(
+                    event.get("kind") == "verb"
+                    and event.get("verb") == "make-coding-prompt"
+                    and event.get("slice") == slice_id
+                    and event.get("artifact") == prompt_rel
+                    for event in events[start:]
+                ):
+                    return True
+        return False
+
+    def _ensure_verified_coder_attempt(
+        self, slice_id: str, state: PlanningState
+    ) -> TickResult | None:
         attempts = self._store.list_attempts(self._run_id, slice_id)
         candidates = [
             a
@@ -2537,9 +3511,49 @@ class Supervisor:
             if self._is_coder_evidence_attempt(a)
         ]
         if not candidates:
-            adopted = self._adopt_prior_coder_attempt(slice_id)
-            if isinstance(adopted, TickResult):
-                return adopted
+            context = self._adoption_context(slice_id, state)
+            if context is None:
+                target = state.artifacts.coding_prompt
+                if isinstance(target, str):
+                    return self._architect_corrective_or_stop(
+                        CorrectiveFailureClass.PROMPT_ADOPTION,
+                        "current_prompt_identity_unavailable",
+                        target,
+                        reason=StopReason.VERIFICATION_MISSING,
+                        detail="current coder prompt/evidence identity is unavailable",
+                        state=state,
+                        slice_id=slice_id,
+                    )
+                return self._stop(
+                    StopReason.VERIFICATION_MISSING,
+                    "current coder prompt/evidence identity is unavailable",
+                    state=state,
+                    slice_id=slice_id,
+                )
+            prompt_rel, prompt_sha256, expected_rel = context
+            adopted = self._adopt_prior_coder_attempt(
+                slice_id, prompt_rel, prompt_sha256, expected_rel
+            )
+            if isinstance(adopted, _AdoptionRefusal):
+                detail = f"prior coder evidence adoption refused: {adopted.code}"
+                if adopted.code == "prior_attempt_identity_mismatch":
+                    return self._architect_corrective_or_stop(
+                        CorrectiveFailureClass.PROMPT_ADOPTION,
+                        adopted.code,
+                        prompt_rel,
+                        reason=StopReason.VERIFICATION_MISSING,
+                        detail=detail,
+                        state=state,
+                        slice_id=slice_id,
+                        attempt_id=adopted.attempt_id,
+                    )
+                return self._stop(
+                    StopReason.VERIFICATION_MISSING,
+                    detail,
+                    state=state,
+                    slice_id=slice_id,
+                    attempt_id=adopted.attempt_id,
+                )
             if adopted is None:
                 return self._stop(
                     StopReason.VERIFICATION_MISSING,
@@ -2607,9 +3621,61 @@ class Supervisor:
                     return True
         return False
 
+    def _candidate_matches_adoption_context(
+        self,
+        run_id: str,
+        slice_id: str,
+        attempt: Path,
+        prompt_rel: str,
+        prompt_sha256: str,
+        expected_rel: tuple[str, ...],
+    ) -> bool:
+        adoption = self._store.read_adoption(attempt)
+        if adoption is not None:
+            return (
+                adoption.get("contract_version") == 1
+                and adoption.get("prompt_source") == prompt_rel
+                and adoption.get("prompt_source_sha256") == prompt_sha256
+                and adoption.get("expected_artifacts") == list(expected_rel)
+            )
+        request = self._store.read_request(attempt) or {}
+        if request.get("expected_artifacts") != list(expected_rel):
+            return False
+        try:
+            events = self._store.read_events(run_id)
+        except RunStoreRefusal:
+            return False
+        source = next(
+            (
+                event
+                for event in reversed(events)
+                if event.get("kind") == "dispatch"
+                and event.get("slice") == slice_id
+                and event.get("attempt") == attempt.name
+                and event.get("role") == "coder"
+            ),
+            None,
+        )
+        if source is not None and isinstance(source.get("prompt_source"), str):
+            return (
+                source.get("prompt_source") == prompt_rel
+                and source.get("prompt_source_sha256") == prompt_sha256
+            )
+        prompt_path = _contained_project_path(
+            self._project_root, request.get("prompt_path")
+        )
+        return (
+            prompt_path == self._project_root / prompt_rel
+            and request.get("prompt_sha256") == prompt_sha256
+        )
+
     def _adopt_prior_coder_attempt(
-        self, slice_id: str
-    ) -> Path | TickResult | None:
+        self,
+        slice_id: str,
+        prompt_rel: str,
+        prompt_sha256: str,
+        expected_rel: tuple[str, ...],
+    ) -> Path | _AdoptionRefusal | None:
         prior: tuple[str, Path] | None = None
         for run_id in reversed(self._store.list_runs()):
             if run_id == self._run_id:
@@ -2620,6 +3686,14 @@ class Supervisor:
                 if (
                     request.get("role") == "coder"
                     and result.get("status") == "completed"
+                    and self._candidate_matches_adoption_context(
+                        run_id,
+                        slice_id,
+                        attempt,
+                        prompt_rel,
+                        prompt_sha256,
+                        expected_rel,
+                    )
                 ):
                     prior = (run_id, attempt)
                     break
@@ -2630,15 +3704,15 @@ class Supervisor:
 
         prior_run, prior_attempt = prior
         checked = self._check_adoption_candidate(
-            prior_run, slice_id, prior_attempt
+            prior_run,
+            slice_id,
+            prior_attempt,
+            prompt_rel,
+            prompt_sha256,
+            expected_rel,
         )
         if isinstance(checked, str):
-            return self._stop(
-                StopReason.VERIFICATION_MISSING,
-                f"prior coder evidence adoption refused: {checked}",
-                slice_id=slice_id,
-                attempt_id=prior_attempt.name,
-            )
+            return _AdoptionRefusal(checked, prior_attempt.name)
         hashes = checked
         attempt = self._store.create_attempt(self._run_id, slice_id)
         adoption = {
@@ -2646,6 +3720,9 @@ class Supervisor:
             "prior_run_id": prior_run,
             "prior_slice_id": slice_id,
             "prior_attempt_id": prior_attempt.name,
+            "prompt_source": prompt_rel,
+            "prompt_source_sha256": prompt_sha256,
+            "expected_artifacts": list(expected_rel),
             "evidence_sha256": hashes,
         }
         self._store.write_adoption(attempt, adoption)
@@ -2655,14 +3732,32 @@ class Supervisor:
             slice=slice_id,
             prior_run=prior_run,
             prior_attempt=prior_attempt.name,
+            prompt_source=prompt_rel,
+            prompt_source_sha256=prompt_sha256,
+            expected_artifacts=list(expected_rel),
             evidence_sha256=hashes,
         )
         self._advance_transition(attempt, "collected")
         return attempt
 
     def _check_adoption_candidate(
-        self, prior_run: str, slice_id: str, attempt: Path
+        self,
+        prior_run: str,
+        slice_id: str,
+        attempt: Path,
+        prompt_rel: str,
+        prompt_sha256: str,
+        expected_rel: tuple[str, ...],
     ) -> dict[str, str] | str:
+        if not self._candidate_matches_adoption_context(
+            prior_run,
+            slice_id,
+            attempt,
+            prompt_rel,
+            prompt_sha256,
+            expected_rel,
+        ):
+            return "prior_attempt_identity_mismatch"
         required = ("request.json", "result.json", "diff_manifest.json")
         members: list[tuple[str, Path]] = [
             (name, attempt / name) for name in required
@@ -2776,6 +3871,17 @@ class Supervisor:
     # ----------------------------------------------------------- recovery
 
     def resume(self) -> TickResult | None:
+        for event in reversed(self._events):
+            if event.get("kind") != "stop":
+                continue
+            if event.get("reason") == StopReason.FRESH_RUN_REQUIRED.value:
+                command = str(event.get("fresh_launch_command", ""))
+                return TickResult(
+                    "refused",
+                    "fresh_run_required: ordinary resume refused; "
+                    f"launch: {command}",
+                )
+            break
         self._journal("resume", run=self._run_id)
         stop = self._reconcile_pending_verb()
         if stop is not None:
@@ -2884,6 +3990,16 @@ class Supervisor:
                         tokens_in=result.get("tokens_in"),
                         tokens_out=result.get("tokens_out"),
                         cost_usd=result.get("cost_usd"),
+                        cost_knowledge=result.get(
+                            "cost_knowledge", "unknown"
+                        ),
+                        provider_duration_seconds=result.get(
+                            "provider_duration_seconds"
+                        ),
+                        retry_class=result.get(
+                            "retry_class", "not_applicable"
+                        ),
+                        truncated=result.get("capture_truncated", False),
                     )
                 if self._store.read_transition(attempt) != "closed":
                     self._advance_transition(attempt, "validated")
@@ -2903,6 +4019,17 @@ class Supervisor:
                 slice=slice_id,
                 status=str(result.get("status", "")),
                 cost_usd=result.get("cost_usd"),
+                cost_knowledge=result.get("cost_knowledge", "unknown"),
+                tokens_in=result.get("tokens_in"),
+                tokens_out=result.get("tokens_out"),
+                provider_duration_seconds=result.get(
+                    "provider_duration_seconds"
+                ),
+                observed_duration_seconds=result.get(
+                    "observed_duration_seconds"
+                ),
+                retry_class=result.get("retry_class", "not_applicable"),
+                truncated=result.get("capture_truncated", False),
             )
         completed_control = any(
             event.get("attempt") == attempt.name
@@ -3057,6 +4184,13 @@ class Supervisor:
                 slice=attempt.parent.name,
                 status="completed",
                 cost_usd=None,
+                cost_knowledge="unknown",
+                tokens_in=None,
+                tokens_out=None,
+                provider_duration_seconds=None,
+                observed_duration_seconds=None,
+                retry_class="not_applicable",
+                truncated=False,
             )
         self._journal(
             "reconciled_attempt",
@@ -3088,6 +4222,9 @@ class Supervisor:
         verified = self._run_verification(attempt, lease, slice_id)
         if isinstance(verified, TickResult):
             return verified
+        self._journal_ladder_event(
+            attempt, slice_id, LadderFailureClass.PRODUCT_FINDING
+        )
         self._advance_transition(attempt, "validated")
         self._advance_transition(attempt, "closed")
         return TickResult("acted", "coder_attempt_completed")
@@ -3329,6 +4466,7 @@ class Supervisor:
         slice_id: str = "",
         attempt_id: str = "",
         decision: str = "",
+        fresh_run: _OwnerNoteChange | None = None,
     ) -> TickResult:
         if state is not None and not slice_id and state.frontier:
             slice_id = state.frontier.slice_id
@@ -3341,6 +4479,13 @@ class Supervisor:
                 f"diagnostic_codes={codes}"
             )
         attempts_summary = self._attempts_summary(slice_id)
+        corrective_summary = self._corrective_escalation_summary(slice_id)
+        if corrective_summary:
+            attempts_summary += "\n\n" + corrective_summary
+        if reason is StopReason.PATH_VIOLATION:
+            fence_evidence = self._path_violation_evidence(slice_id, attempt_id)
+            if fence_evidence:
+                attempts_summary += "\n\n" + fence_evidence
         decision_required = decision or (
             f"Resolve the '{reason.value}' stop condition ({detail})."
         )
@@ -3370,8 +4515,25 @@ class Supervisor:
             )
             safe_options = (
                 "Use only the recorded three-exit reassessment fork. The "
-                "runner does not parse reports, compute invariant recurrence, "
-                "or authorize a fourth round."
+                "runner keys recurrence only from its typed lifecycle events; "
+                "it does not parse reports or authorize a fourth round."
+            )
+        fresh_launch_command = ""
+        controlling_note_sha256 = ""
+        predecessor_run_id = ""
+        resume_command = f"python -m frutlups_drive resume . {self._run_id}"
+        if fresh_run is not None:
+            fresh_launch_command = (
+                f"python -m frutlups_drive run . --until {self._boundary} "
+                f"--predecessor-run {self._run_id}"
+            )
+            controlling_note_sha256 = fresh_run.controlling_sha256
+            predecessor_run_id = self._run_id
+            resume_command = ""
+            safe_options = (
+                "Do not resume this predecessor run. Review the changed "
+                "owner-note authority, then use only the exact fresh launch "
+                f"command: {fresh_launch_command}"
             )
         escalation = write_escalation(
             self._store,
@@ -3387,17 +4549,29 @@ class Supervisor:
                 "No commit, artifact acceptance, governance edit, redispatch, "
                 "or retry was performed after the stop condition fired."
             ),
-            resume_command=f"python -m frutlups_drive resume . {self._run_id}",
+            resume_command=resume_command,
+            fresh_launch_command=fresh_launch_command,
+            controlling_note_sha256=controlling_note_sha256,
+            predecessor_run_id=predecessor_run_id,
         )
         try:
-            self._journal(
-                "stop",
-                reason=reason.value,
-                detail=detail,
-                escalation=escalation.name,
-                slice=slice_id,
-                attempt=attempt_id,
-            )
+            fields: dict[str, object] = {
+                "reason": reason.value,
+                "detail": detail,
+                "escalation": escalation.name,
+                "slice": slice_id,
+                "attempt": attempt_id,
+            }
+            if fresh_run is not None:
+                fields.update(
+                    {
+                        "fresh_launch_command": fresh_launch_command,
+                        "controlling_note_sha256": controlling_note_sha256,
+                        "predecessor_run_id": predecessor_run_id,
+                        "controlling_note": fresh_run.path,
+                    }
+                )
+            self._journal("stop", **fields)
         except RunStoreRefusal as refusal:
             # The tick boundary must not recursively retry the very journal
             # write that proves the governed stop. One honest attempt is the
@@ -3405,6 +4579,84 @@ class Supervisor:
             setattr(refusal, _STOP_JOURNAL_ATTEMPTED, True)
             raise
         return TickResult("stopped", detail, reason, escalation)
+
+    def _path_violation_evidence(self, slice_id: str, attempt_id: str) -> str:
+        """Render exact sorted fence facts without changing their journal shape."""
+
+        fence = next(
+            (
+                event
+                for event in reversed(self._events)
+                if event.get("kind") == "fence"
+                and event.get("attempt", "") == attempt_id
+            ),
+            None,
+        )
+        if fence is None or not isinstance(fence.get("violations"), list):
+            return ""
+        violations: list[tuple[str, str]] = []
+        for item in fence["violations"]:
+            if not isinstance(item, dict):
+                continue
+            code = item.get("code")
+            path = item.get("path")
+            if isinstance(code, str) and isinstance(path, str):
+                violations.append((code, path))
+        violations.sort()
+        if not violations:
+            return ""
+
+        expected: list[str] = []
+        access = ""
+        if slice_id and attempt_id:
+            try:
+                attempt = next(
+                    (
+                        candidate
+                        for candidate in self._store.list_attempts(
+                            self._run_id, slice_id
+                        )
+                        if candidate.name == attempt_id
+                    ),
+                    None,
+                )
+                request = self._store.read_request(attempt) if attempt else None
+            except (OSError, RunStoreRefusal, UnicodeDecodeError, ValueError):
+                request = None
+            if isinstance(request, dict):
+                raw_expected = request.get("expected_artifacts")
+                if isinstance(raw_expected, list):
+                    expected = sorted(
+                        item for item in raw_expected if _canonical_relative(item)
+                    )
+                if request.get("workspace_access") in (
+                    "read_only",
+                    "workspace_write",
+                ):
+                    access = str(request["workspace_access"])
+        if any(code == "reconciliation_scope" for code, _ in violations):
+            expected.extend(RECONCILIATION_PREFIXES)
+        expected = sorted(set(expected))
+
+        lines = ["### Workspace Fence Evidence", "", "Sorted violations:"]
+        lines.extend(
+            f"- code = {json.dumps(code)}; path = {json.dumps(path)}"
+            for code, path in violations
+        )
+        lines.extend(["", "Expected allowed prefixes or exact paths:"])
+        if expected:
+            lines.extend(f"- {json.dumps(path)}" for path in expected)
+        else:
+            lines.append("- none recorded for this fence")
+        if access == "workspace_write":
+            lines.append(
+                "- workspace-write product surface (excluding "
+                '"PROJECT_STATE.md", "03_experiments/", and '
+                '"05_governance/" unless an exact expected artifact is listed)'
+            )
+        elif access == "read_only":
+            lines.append("- read-only: only the exact expected artifacts above")
+        return "\n".join(lines)
 
     def _ladder_round3_chain(
         self, state: PlanningState | None, slice_id: str
@@ -3608,6 +4860,44 @@ def _checked_findings(payload: object, maximum: int) -> list[str]:
     return list(findings)
 
 
+def _checked_rework_declaration(
+    payload: object,
+) -> tuple[int, str, int, tuple[str, ...]]:
+    required = {
+        "contract_id",
+        "contract_version",
+        "declaration_sequence",
+        "pass_id",
+        "baseline_prompt_sequence",
+        "slice_ids",
+    }
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError("rework declaration shape is invalid")
+    sequence = payload.get("declaration_sequence")
+    baseline = payload.get("baseline_prompt_sequence")
+    pass_id = payload.get("pass_id")
+    slice_ids = payload.get("slice_ids")
+    match = _REWORK_PASS_ID.fullmatch(pass_id) if isinstance(pass_id, str) else None
+    if (
+        payload.get("contract_id") != "frutlups.rework_declaration"
+        or payload.get("contract_version") != "1"
+        or type(sequence) is not int
+        or sequence < 1
+        or type(baseline) is not int
+        or baseline < 0
+        or match is None
+        or not isinstance(slice_ids, list)
+        or not 1 <= len(slice_ids) <= 64
+        or any(
+            not isinstance(item, str) or not _SLICE_ID.fullmatch(item)
+            for item in slice_ids
+        )
+        or len(set(slice_ids)) != len(slice_ids)
+    ):
+        raise ValueError("rework declaration contract is invalid")
+    return sequence, pass_id, int(match.group("number")), tuple(slice_ids)
+
+
 def _valid_pass_boundary_record(payload: object, run_id: str) -> bool:
     if (
         not isinstance(payload, dict)
@@ -3622,16 +4912,36 @@ def _valid_pass_boundary_record(payload: object, run_id: str) -> bool:
             return False
         paths: set[str] = set()
         for member in members:
-            if (
-                not isinstance(member, dict)
-                or set(member) != {"path", "sha256"}
-                or not _canonical_relative(member.get("path"))
-                or not _sha256_text(member.get("sha256"))
-                or member["path"] in paths
-            ):
+            ordinary = (
+                isinstance(member, dict)
+                and set(member) == {"path", "sha256"}
+                and _canonical_relative(member.get("path"))
+                and _sha256_text(member.get("sha256"))
+            )
+            excluded = (
+                key == "artifacts"
+                and isinstance(member, dict)
+                and set(member)
+                == {"path", "sha256", "size_bytes", "type"}
+                and member.get("type") == "excluded"
+                and _excluded_boundary_path(member.get("path"))
+                and _sha256_text(member.get("sha256"))
+                and type(member.get("size_bytes")) is int
+                and member["size_bytes"] >= 0
+            )
+            if not (ordinary or excluded) or member["path"] in paths:
                 return False
             paths.add(member["path"])
     return True
+
+
+def _excluded_boundary_path(value: object) -> bool:
+    if _canonical_relative(value):
+        return True
+    if not isinstance(value, str) or not value.endswith("/"):
+        return False
+    directory = value[:-1]
+    return _canonical_relative(directory) and len(PurePosixPath(directory).parts) == 1
 
 
 def _tree_inventory(

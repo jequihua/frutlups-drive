@@ -178,6 +178,36 @@ class CommandObservation:
     exit_code: int | None = None
     stdout_overflow: bool = False
     stderr_overflow: bool = False
+    duration_seconds: float | None = None
+    stdout_total_bytes: int = 0
+    stderr_total_bytes: int = 0
+    stdout_event_count: int = 0
+    stderr_event_count: int = 0
+    stdout_head: bytes = b""
+    stdout_tail: bytes = b""
+    stderr_head: bytes = b""
+    stderr_tail: bytes = b""
+
+
+def _observed(
+    kind: str, outcome, *, exit_code: int | None = None
+) -> CommandObservation:
+    duration = float(outcome.ended) - float(outcome.started)
+    return CommandObservation(
+        kind,
+        exit_code=exit_code,
+        stdout_overflow=outcome.stdout_overflow,
+        stderr_overflow=outcome.stderr_overflow,
+        duration_seconds=max(0.0, duration) if math.isfinite(duration) else None,
+        stdout_total_bytes=outcome.stdout_total_bytes,
+        stderr_total_bytes=outcome.stderr_total_bytes,
+        stdout_event_count=outcome.stdout_event_count,
+        stderr_event_count=outcome.stderr_event_count,
+        stdout_head=outcome.stdout_head,
+        stdout_tail=outcome.stdout_tail,
+        stderr_head=outcome.stderr_head,
+        stderr_tail=outcome.stderr_tail,
+    )
 
 
 def observe_command(
@@ -189,6 +219,7 @@ def observe_command(
     stdout_path: Path,
     stderr_path: Path,
     max_stream_bytes: int = MAX_STREAM_CAPTURE_BYTES,
+    terminate_on_overflow: bool = True,
 ) -> CommandObservation:
     """Run one declared command and classify its transport outcome.
 
@@ -201,6 +232,9 @@ def observe_command(
     if not Path(argv[0]).is_file():
         return CommandObservation("missing_executable")
     try:
+        kwargs = {"max_stream_bytes": max_stream_bytes}
+        if not terminate_on_overflow:
+            kwargs["terminate_on_overflow"] = False
         outcome = runner.run(
             tuple(argv),
             Path(cwd),
@@ -208,28 +242,19 @@ def observe_command(
             timeout_seconds,
             Path(stdout_path),
             Path(stderr_path),
-            max_stream_bytes=max_stream_bytes,
+            **kwargs,
         )
     except Exception:
         # The accepted runner already reduced its failure to bounded owned
         # text; this layer records only the classification, never the text.
         return CommandObservation("runner_failure")
     if outcome.timed_out:
-        return CommandObservation(
-            "timeout",
-            stdout_overflow=outcome.stdout_overflow,
-            stderr_overflow=outcome.stderr_overflow,
-        )
+        return _observed("timeout", outcome)
     if outcome.stdout_overflow or outcome.stderr_overflow:
-        return CommandObservation(
-            "overflow",
-            exit_code=outcome.exit_code,
-            stdout_overflow=outcome.stdout_overflow,
-            stderr_overflow=outcome.stderr_overflow,
-        )
+        return _observed("overflow", outcome, exit_code=outcome.exit_code)
     if outcome.exit_code is None:
         return CommandObservation("no_status")
-    return CommandObservation("exit", exit_code=outcome.exit_code)
+    return _observed("exit", outcome, exit_code=outcome.exit_code)
 
 
 _OBSERVATION_FACTS = {
@@ -249,11 +274,23 @@ class SubprocessAgentExecutor:
     request bounds)."""
 
     def __init__(
-        self, spec: AgentCommandSpec, runner: ProcessRunner, log_root: Path
+        self,
+        spec: AgentCommandSpec,
+        runner: ProcessRunner,
+        log_root: Path,
+        *,
+        spool_root: Path | None = None,
+        tolerate_truncation: bool = False,
     ) -> None:
         self._spec = spec
         self._runner = runner
         self._log_root = Path(log_root)
+        self._spool_root = (
+            Path(spool_root)
+            if spool_root is not None
+            else self._log_root / "capture_spool"
+        )
+        self._tolerate_truncation = tolerate_truncation
 
     def execute(self, request: AgentRunRequest) -> AgentRunResult:
         workspace = Path(request.workspace)
@@ -287,7 +324,10 @@ class SubprocessAgentExecutor:
             stdout_path,
             stderr_path,
             max_stream_bytes=self._spec.max_stream_bytes,
+            terminate_on_overflow=not self._tolerate_truncation,
         )
+        if observation.stdout_overflow or observation.stderr_overflow:
+            self._write_capture_spool(observation)
         self._write_event_log(events_path, request, timeout, observation)
         if observation.kind == "runner_failure":
             raise SubprocessAgentFailure(
@@ -301,6 +341,13 @@ class SubprocessAgentExecutor:
                 "agent_exit_clean"
                 if observation.exit_code == 0
                 else "agent_exit_nonzero"
+            )
+        elif observation.kind == "overflow" and self._tolerate_truncation:
+            status = "completed" if observation.exit_code == 0 else "failed"
+            exit_reason = (
+                "agent_exit_clean_capture_truncated"
+                if observation.exit_code == 0
+                else "agent_exit_nonzero_capture_truncated"
             )
         else:
             status, exit_reason = _OBSERVATION_FACTS[observation.kind]
@@ -318,6 +365,59 @@ class SubprocessAgentExecutor:
             tokens_in=None,
             tokens_out=None,
             cost_usd=None,
+            observed_duration_seconds=observation.duration_seconds,
+            retry_class=(
+                _timeout_retry_class(observation)
+                if observation.kind == "timeout"
+                else "not_applicable"
+            ),
+            cost_knowledge="unknown",
+            capture_truncated=(
+                observation.stdout_overflow or observation.stderr_overflow
+            ),
+        )
+
+    def _write_capture_spool(self, observation: CommandObservation) -> None:
+        """Write fixed-size head/tail evidence and one bounded JSON summary."""
+
+        if self._spool_root.exists():
+            raise SubprocessAgentFailure(
+                "capture_conflict", "capture overflow evidence already exists"
+            )
+        self._spool_root.mkdir(parents=True)
+        streams = {}
+        for name in ("stdout", "stderr"):
+            head = getattr(observation, f"{name}_head")
+            tail = getattr(observation, f"{name}_tail")
+            head_name = f"{name}_head.bin"
+            tail_name = f"{name}_tail.bin"
+            (self._spool_root / head_name).write_bytes(head)
+            (self._spool_root / tail_name).write_bytes(tail)
+            streams[name] = {
+                "event_count": getattr(observation, f"{name}_event_count"),
+                "head_bytes": len(head),
+                "head_path": head_name,
+                "overflow": getattr(observation, f"{name}_overflow"),
+                "tail_bytes": len(tail),
+                "tail_path": tail_name,
+                "total_bytes": getattr(observation, f"{name}_total_bytes"),
+            }
+        payload = {
+            "schema": "frutlups_drive_capture_spool_v1",
+            "streams": streams,
+            "truncated": True,
+        }
+        self._spool_root.joinpath("summary.json").write_bytes(
+            (
+                json.dumps(
+                    payload,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
         )
 
     def _write_event_log(
@@ -348,6 +448,10 @@ class SubprocessAgentExecutor:
                 "exit_code": observation.exit_code,
                 "stdout_overflow": observation.stdout_overflow,
                 "stderr_overflow": observation.stderr_overflow,
+                "truncated": observation.stdout_overflow
+                or observation.stderr_overflow,
+                "event_count": observation.stdout_event_count
+                + observation.stderr_event_count,
                 "stdout_capture": events_path.name.replace(
                     "_events.jsonl", "_stdout.txt"
                 ),
@@ -369,3 +473,51 @@ class SubprocessAgentExecutor:
             for line in lines
         )
         events_path.write_bytes((serialized + "\n").encode("utf-8"))
+
+
+def _timeout_retry_class(observation: CommandObservation) -> str:
+    """Classify only evidence retained by the bounded transport.
+
+    A complete structured event that says a command/subprocess/tool is still
+    running is sufficient to refuse a byte-identical envelope.  Other stream
+    activity is model progress; an entirely quiet timeout remains provider-
+    retryable rather than inventing a subprocess fact.
+    """
+
+    raw = b"\n".join(
+        (
+            observation.stdout_head,
+            observation.stdout_tail,
+            observation.stderr_head,
+            observation.stderr_tail,
+        )
+    )
+    for line in raw.splitlines():
+        try:
+            value = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(value, dict):
+            continue
+        labels = " ".join(
+            str(value.get(key, "")).lower()
+            for key in ("event", "type", "kind", "tool", "name", "status")
+        )
+        child_marker = any(
+            marker in labels
+            for marker in (
+                "subprocess",
+                "command_execution",
+                "tool_use",
+                "tool_call",
+            )
+        )
+        running_marker = any(
+            marker in labels
+            for marker in ("running", "in_progress", "started")
+        )
+        if child_marker and running_marker:
+            return "scientific_subprocess_running"
+    if observation.stdout_total_bytes or observation.stderr_total_bytes:
+        return "model_stream_active"
+    return "provider_retryable"

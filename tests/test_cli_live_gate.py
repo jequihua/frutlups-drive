@@ -57,6 +57,14 @@ class LiveGateCliTests(CliTestCase):
         self.assertEqual(self.tree_snapshot(self.project), before)
         self.assertFalse((self.project / ".frutlups_drive").exists())
 
+    def assert_plan_refusal(self, expected):
+        before = self.tree_snapshot(self.project)
+        code, _, err = self.invoke_with_gate("plan", str(self.project))
+        self.assertEqual(code, int(ExitCode.REFUSED))
+        self.assertIn(expected, err)
+        self.assertEqual(self.tree_snapshot(self.project), before)
+        self.assertFalse((self.project / ".frutlups_drive").exists())
+
     def test_missing_duplicated_oversized_and_unapproved_gate_refuse(self):
         cases = (
             (None, "gate_file_missing"),
@@ -119,6 +127,39 @@ class LiveGateCliTests(CliTestCase):
         self.assertFalse(
             (self.project / PROVIDER_BINDING_RELATIVE_PATH).exists()
         )
+        self.assert_pre_store_refusal("provider_binding_missing")
+
+    def test_architect_corrective_turn_enablement_and_cap_require_equality(self):
+        enabled_policy = EXTERNAL_POLICY.replace(
+            b'schema_version = "frutlups_drive_policy_v1"',
+            b'schema_version = "frutlups_drive_policy_v1"\n'
+            b'architect_corrective_turn_enabled = true\n'
+            b'max_architect_corrective_turns_per_run = 2',
+        )
+        enabled_gate = gate_markdown(
+            extra=(
+                "architect_corrective_turn_enabled = true\n"
+                "max_architect_corrective_turns_per_run = 2"
+            )
+        )
+        mismatches = (
+            (enabled_policy, gate_markdown()),
+            (EXTERNAL_POLICY, enabled_gate),
+        )
+        for policy, gate in mismatches:
+            with self.subTest(policy_enabled=b"architect_corrective" in policy):
+                (self.project / "frutlups_drive.toml").write_bytes(policy)
+                self.gate.write_text(gate, encoding="utf-8")
+                self.assert_plan_refusal(
+                    "architect_corrective_turn_authority_mismatch"
+                )
+                self.assert_pre_store_refusal(
+                    "architect_corrective_turn_authority_mismatch"
+                )
+        (self.project / "frutlups_drive.toml").write_bytes(enabled_policy)
+        self.gate.write_text(enabled_gate, encoding="utf-8")
+        code, _, err = self.invoke_with_gate("plan", str(self.project))
+        self.assertEqual(code, int(ExitCode.OK), err)
         self.assert_pre_store_refusal("provider_binding_missing")
 
     def test_all_mock_run_needs_no_gate_file(self):

@@ -9,12 +9,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import _bootstrap  # noqa: F401  (sys.path bootstrap, must precede package imports)
 
 from frutlups_drive.cli import main
 from frutlups_drive.contracts import ExitCode
+from frutlups_drive.planstate import MemoryMode, MockPlanProvider
 from frutlups_drive.runstore import RunStoreRefusal
 
 FIXTURE_PROJECT = (
@@ -75,7 +76,11 @@ class PlanVerbTests(CliTestCase):
         code, out, err = self.invoke("plan", str(project))
         self.assertEqual(code, int(ExitCode.OK))
         self.assertIn("policy: absent", out)
+        self.assertIn(
+            "planning check: mock script .frutlups_drive_mock/script.json", out
+        )
         self.assertIn("outcome=ready step=execute_coding_prompt", out)
+        self.assertIn("frontier=M001/M001-S01", out)
         self.assertEqual(sorted(str(p) for p in project.rglob("*")), before)
         self.assertFalse((project / ".frutlups_drive").exists())
 
@@ -91,6 +96,42 @@ class PlanVerbTests(CliTestCase):
         code, _, err = self.invoke("plan", str(self.tmp / "missing"))
         self.assertEqual(code, int(ExitCode.REFUSED))
         self.assertIn("project_missing", err)
+
+    def test_live_configured_plan_reports_the_released_observation_truthfully(self):
+        project = self.copy_fixture()
+        policy = project / "frutlups_drive.toml"
+        policy.write_text(
+            policy.read_text(encoding="utf-8")
+            + '\n[frutlups]\nprovider = "frutlups_cli"\n',
+            encoding="utf-8",
+        )
+        payload = (
+            project / ".frutlups_drive_mock/planstate/001.json"
+        ).read_bytes()
+        state = MockPlanProvider((payload,)).read_planning_state()
+        provider = Mock()
+        provider.read_planning_state.return_value = state
+        before = self.tree_snapshot(project)
+        with patch("frutlups_drive.cli._required_binding", return_value=object()), \
+             patch("frutlups_drive.cli._build_launch_identity"), \
+             patch(
+                 "frutlups_drive.cli._admit_memory_mode",
+                 return_value=(MemoryMode.none(), provider),
+             ):
+            code, out, err = self.invoke("plan", str(project))
+        self.assertEqual(code, int(ExitCode.OK), err)
+        self.assertIn(
+            "planning check: released frutlups status read "
+            "(strict planning_frontier + loop_resume; no provider dispatch)",
+            out,
+        )
+        self.assertIn(
+            "next action: outcome=ready step=execute_coding_prompt "
+            "frontier=M001/M001-S01",
+            out,
+        )
+        provider.read_planning_state.assert_called_once_with()
+        self.assertEqual(self.tree_snapshot(project), before)
 
 
 class RunVerbTests(CliTestCase):

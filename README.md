@@ -73,6 +73,89 @@ project's policy and applicable local authority declarations.
    python -m frutlups_drive run <project> --until slice_complete
    ```
 
+## Governed oracle exclusions
+
+The pass-boundary oracle keeps its 16 MiB per-file content bound and does not
+infer exclusions from `.gitignore`. A project with intentional large local
+outputs may declare one committed, project-local manifest in its policy:
+
+```toml
+oracle_exclusion_manifest = "05_governance/oracle_exclusions.json"
+```
+
+The referenced UTF-8 JSON file has this exact version-1 shape:
+
+```json
+{
+  "contract_version": 1,
+  "exact_paths": ["reports/large-local-result.bin"],
+  "top_level_prefixes": ["build/"]
+}
+```
+
+Exact paths name files. Prefixes name top-level directories and must end in
+`/`. The manifest itself is frozen as an ordinary artifact. Excluded files are
+never silent: exact files receive individual `type: "excluded"` boundary
+members, while each excluded top-level tree receives one aggregate excluded
+member; both carry streamed byte-size and SHA-256 evidence. Missing,
+malformed, link-like, self-excluding, or over-bound manifests refuse before
+`pass_boundary.json` is written. With no declaration, boundary and oracle
+behavior remain unchanged. An oversize refusal lists the offending paths and
+sizes plus candidate top-level prefixes; the drive never auto-excludes them.
+
+## Dispatch environment, ceilings, and capture evidence
+
+Optional M009 dispatch controls fail closed when present and leave prior
+behavior unchanged when omitted. `runtime_environment_bindings` is an array of
+approved non-secret name/literal pairs; external live gates must declare the
+same pairs. Their names and value SHA-256 hashes enter the run manifest, while
+credential variables remain names-only and are never hashed.
+
+```toml
+runtime_environment_bindings = [
+  {name = "JAVA_TOOL_OPTIONS", value = "-Djava.io.tmpdir=.tmp"},
+]
+
+# Default off. A live gate must declare the same values.
+architect_corrective_turn_enabled = true
+max_architect_corrective_turns_per_run = 1
+
+[dispatch]
+role_call_ceiling_seconds = {coder = 2400, reviewer = 1200}
+slice_call_ceiling_overrides = [
+  {slice_id = "M009-S03", ceiling_seconds = 7200},
+]
+scientific_subprocess_budget_seconds = 5400
+capture_truncation_disposition = "invalidate" # or "tolerate"
+
+[reporting]
+currency = "EUR"
+external_provider_ceilings = [
+  {provider = "codex_cli", ceiling = 100},
+]
+```
+
+Slice ceilings override role ceilings; otherwise the existing global call
+ceiling applies. The scientific subprocess budget is separate from model-call
+and artifact-watch time. External currency ceilings are recorded and reported
+only—no enforcement path consumes them.
+
+The architect corrective turn is limited to typed prompt-contract,
+prompt-adoption, and rework-declaration-mapping stops. Each selected stop gets
+at most one architect dispatch and one staged JSON proposal. The drive applies
+only the exact failing prompt or rework-declaration path after structural and
+released-frutlups dry-run checks; it refuses sidecars, governance-adjacent
+targets, and accepted history. A refused proposal remains run-store evidence
+and the original governed stop remains in force. This surface is disabled
+unless policy and live gate declare identical enablement and per-run cap facts.
+
+The stream admission ceiling remains 1,048,576 bytes per stream. On overflow,
+the attempt stores a `capture_spool/summary.json` plus fixed 65,536-byte maximum
+head and tail files for stdout and stderr. The summary records per-stream total
+bytes and newline-delimited event counts and the journal marks
+`truncated: true`. `invalidate` retains the fail-closed attempt disposition;
+`tolerate` may continue only after a clean process exit.
+
 Read [the operator's manual](docs/operators_manual.md) before authorizing live
 model seats. It covers the roadmap pair, policy, bindings, live gate, budgets,
 monitoring, stops, and recovery in full.

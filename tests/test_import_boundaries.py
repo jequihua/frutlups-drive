@@ -81,6 +81,7 @@ class RuntimeImportBoundaryTests(unittest.TestCase):
             import frutlups_drive.budget
             import frutlups_drive.cli
             import frutlups_drive.contracts
+            import frutlups_drive.corrective
             import frutlups_drive.dispatch.base
             import frutlups_drive.dispatch.manual
             import frutlups_drive.dispatch.mock

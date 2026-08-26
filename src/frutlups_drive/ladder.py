@@ -1,14 +1,12 @@
-"""Mechanical convergence-ladder cap (architecture contract §9, owner ruling).
+"""Convergence-ladder cap over a supervisor-normalized recurrence count.
 
-The runner never computes invariant-level recurrence; it enforces the
-conservative mechanical over-approximation within the active acceptance
-lifecycle. The effective round is the higher of the planning state's scripted
-frontier round and the lifecycle-scoped run-store corrective coder-dispatch
-count for the slice (the dispatch about to happen included). A governed
-``declare-rework`` transaction that re-opens an accepted slice starts a fresh
-lifecycle count. Round 3 stops for architect reassessment; round 4 or later
-requires an explicitly injected recorded human authorization and refuses
-conservatively without it.
+The supervisor supplies the number of prior, journaled product-finding events
+for one normalized recurrence key. Mechanical transport, environment,
+path-contract, and operator kill-switch events are excluded before this small
+cap function is called. Legacy journals without typed ladder events retain the
+prior frontier/collection interpretation. Round 3 stops for architect
+reassessment; round 4 or later requires an explicitly injected recorded human
+authorization and refuses conservatively without it.
 """
 
 from __future__ import annotations

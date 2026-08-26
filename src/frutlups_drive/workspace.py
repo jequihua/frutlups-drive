@@ -13,12 +13,13 @@ paths only; nothing external is mutated by detection.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Machine-local, never-committed state is outside workspace-effect authority:
 # repository metadata, the drive run store, and ignored `local_state/` (the
@@ -27,7 +28,11 @@ from pathlib import Path
 # caught by the exact launch identity before/after governed subprocesses and
 # again during resume rather than being mistaken for an artifact effect.
 _IGNORED_TOP_LEVEL = (".git", ".frutlups_drive", "local_state")
+_REQUIRED_ORACLE_PATHS = ("05_governance/reviews/INDEX.md",)
 _DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
+MAX_ORACLE_EXCLUSION_MANIFEST_BYTES = 64 * 1024
+MAX_ORACLE_EXCLUSION_ENTRIES = 1_024
+_MAX_BOUNDARY_DIAGNOSTIC_BYTES = 16 * 1024
 
 RECONCILIATION_PREFIXES = (
     "03_experiments/",
@@ -47,6 +52,27 @@ class WorkspaceLease:
 class FenceViolation:
     code: str
     path: str
+
+
+class BoundarySnapshotRefusal(Exception):
+    """Fail-closed pass-boundary snapshot refusal with a bounded diagnostic."""
+
+    def __init__(self, code: str, message: str) -> None:
+        message = message[:_MAX_BOUNDARY_DIAGNOSTIC_BYTES]
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class _OracleExclusions:
+    exact_paths: frozenset[str]
+    top_level_prefixes: tuple[str, ...]
+
+    def excludes(self, relative: str) -> bool:
+        return relative in self.exact_paths or relative.startswith(
+            self.top_level_prefixes
+        )
 
 
 class GitRunner:
@@ -112,7 +138,18 @@ class WorkspaceManager:
         """Map of workspace-relative POSIX path -> content SHA-256."""
         root = Path(root)
         result: dict[str, str] = {}
-        for current, dirnames, filenames in os.walk(root):
+        def walk_error(error: OSError) -> None:
+            raw_path = Path(error.filename) if error.filename else root
+            try:
+                relative = raw_path.relative_to(root).as_posix()
+            except ValueError:
+                relative = raw_path.name or "workspace"
+            raise BoundarySnapshotRefusal(
+                "artifact_unreadable",
+                f"pass boundary not frozen; input '{relative}' is unreadable",
+            )
+
+        for current, dirnames, filenames in os.walk(root, onerror=walk_error):
             relative_dir = Path(current).relative_to(root)
             if relative_dir.parts and relative_dir.parts[0] in _IGNORED_TOP_LEVEL:
                 dirnames[:] = []
@@ -134,6 +171,128 @@ class WorkspaceManager:
                     digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 result[relative] = digest
         return result
+
+    def pass_boundary_snapshot(
+        self,
+        root: Path,
+        *,
+        exclusion_manifest: str | None,
+        max_file_bytes: int,
+        max_members: int,
+    ) -> tuple[dict[str, object], ...]:
+        """Build the governed project inventory before its durable freeze.
+
+        With no declaration this produces the same ordinary member shape as
+        :meth:`snapshot`. A declared manifest is strict and project-local.
+        Exact excluded files receive one visible marker each; a declared
+        top-level directory prefix receives one streamed aggregate marker so a
+        large build tree cannot consume the boundary member budget. Ordinary
+        files over the oracle content bound refuse with their exact paths and
+        sizes; no path is ever excluded by inference or by ``.gitignore``.
+        """
+
+        if type(max_file_bytes) is not int or max_file_bytes <= 0:
+            raise ValueError("max_file_bytes must be a positive integer")
+        if type(max_members) is not int or max_members <= 0:
+            raise ValueError("max_members must be a positive integer")
+        root = Path(root)
+        exclusions = _load_oracle_exclusions(root, exclusion_manifest)
+        records: list[dict[str, object]] = []
+        oversized: list[tuple[str, int]] = []
+        overflow: list[tuple[str, int]] = []
+
+        for current, dirnames, filenames in os.walk(root):
+            relative_dir = Path(current).relative_to(root)
+            if relative_dir.parts and relative_dir.parts[0] in _IGNORED_TOP_LEVEL:
+                dirnames[:] = []
+                continue
+            dirnames.sort()
+            filenames.sort()
+            if not relative_dir.parts:
+                allowed: list[str] = []
+                for name in dirnames:
+                    if name in _IGNORED_TOP_LEVEL:
+                        continue
+                    prefix = f"{name}/"
+                    if prefix in exclusions.top_level_prefixes:
+                        path = Path(current) / name
+                        size, digest = _excluded_directory_summary(path)
+                        records.append(
+                            {
+                                "path": prefix,
+                                "sha256": digest,
+                                "size_bytes": size,
+                                "type": "excluded",
+                            }
+                        )
+                        if len(records) > max_members:
+                            overflow.append((prefix, size))
+                    else:
+                        allowed.append(name)
+                dirnames[:] = allowed
+            else:
+                dirnames[:] = list(dirnames)
+
+            for filename in filenames:
+                path = Path(current) / filename
+                relative = (relative_dir / filename).as_posix()
+                excluded = exclusions.excludes(relative)
+                try:
+                    if path.is_symlink():
+                        target = str(os.readlink(path)).encode(
+                            "utf-8", errors="surrogatepass"
+                        )
+                        size = len(target)
+                        digest = hashlib.sha256(b"symlink:" + target).hexdigest()
+                    else:
+                        size = path.stat().st_size
+                        if not excluded and size > max_file_bytes:
+                            oversized.append((relative, size))
+                            continue
+                        size, digest = _streamed_file_summary(path)
+                        if not excluded and size > max_file_bytes:
+                            oversized.append((relative, size))
+                            continue
+                except OSError:
+                    raise BoundarySnapshotRefusal(
+                        "artifact_unreadable",
+                        f"pass boundary not frozen; input '{relative}' is unreadable",
+                    ) from None
+
+                if excluded:
+                    records.append(
+                        {
+                            "path": relative,
+                            "sha256": digest,
+                            "size_bytes": size,
+                            "type": "excluded",
+                        }
+                    )
+                else:
+                    records.append({"path": relative, "sha256": digest})
+                if len(records) > max_members:
+                    overflow.append((relative, size))
+
+        if oversized:
+            raise BoundarySnapshotRefusal(
+                "oracle_input_oversized",
+                _boundary_refusal_message(
+                    oversized,
+                    reason=(
+                        f"files exceed the {max_file_bytes}-byte oracle content bound"
+                    ),
+                ),
+            )
+        if overflow:
+            raise BoundarySnapshotRefusal(
+                "artifact_inventory_overflow",
+                _boundary_refusal_message(
+                    overflow,
+                    reason=f"artifact inventory exceeds its {max_members}-member bound",
+                ),
+            )
+        records.sort(key=lambda item: str(item["path"]))
+        return tuple(records)
 
     def transaction_snapshot(self, root: Path) -> dict[str, str]:
         """Non-lossy verb manifest including ordinary and link-like entries.
@@ -218,9 +377,10 @@ def _spelling_violation(raw: object) -> str | None:
         return "path_invalid"
     if "\x00" in raw:
         return "path_invalid"
-    if raw.startswith(("/", "\\")) or _DRIVE_PREFIX.match(raw):
+    backslash = chr(92)
+    if raw.startswith(("/", backslash)) or _DRIVE_PREFIX.match(raw):
         return "path_escape"
-    if "\\" in raw:
+    if backslash in raw:
         return "path_invalid"
     segments = raw.split("/")
     if ".." in segments:
@@ -425,3 +585,230 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _canonical_relative(value: object) -> bool:
+    if not isinstance(value, str) or not value or chr(92) in value:
+        return False
+    path = PurePosixPath(value)
+    return (
+        not path.is_absolute()
+        and path.as_posix() == value
+        and all(part not in ("", ".", "..") for part in path.parts)
+    )
+
+
+def _is_junction(path: Path) -> bool:
+    return bool(getattr(path, "is_junction", lambda: False)())
+
+
+def _load_oracle_exclusions(
+    root: Path, manifest_relative: str | None
+) -> _OracleExclusions:
+    empty = _OracleExclusions(frozenset(), ())
+    if manifest_relative is None:
+        return empty
+    if not _canonical_relative(manifest_relative):
+        raise _manifest_refusal("the declared path is not canonical")
+    manifest_path = Path(root) / manifest_relative
+    if manifest_relative.split("/", 1)[0] in _IGNORED_TOP_LEVEL:
+        raise _manifest_refusal("the declared file is outside the frozen surface")
+    try:
+        resolved_root = Path(root).resolve(strict=True)
+        resolved = manifest_path.resolve(strict=True)
+        resolved.relative_to(resolved_root)
+        if (
+            manifest_path.is_symlink()
+            or _is_junction(manifest_path)
+            or not resolved.is_file()
+        ):
+            raise OSError
+        with open(resolved, "rb") as stream:
+            data = stream.read(MAX_ORACLE_EXCLUSION_MANIFEST_BYTES + 1)
+    except (OSError, ValueError):
+        raise _manifest_refusal("the declared file is unavailable") from None
+    if len(data) > MAX_ORACLE_EXCLUSION_MANIFEST_BYTES:
+        raise _manifest_refusal(
+            f"the declared file exceeds {MAX_ORACLE_EXCLUSION_MANIFEST_BYTES} bytes"
+        )
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise _manifest_refusal("the declared file is not valid UTF-8 JSON") from None
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        != {"contract_version", "exact_paths", "top_level_prefixes"}
+        or payload.get("contract_version") != 1
+        or not isinstance(payload.get("exact_paths"), list)
+        or not isinstance(payload.get("top_level_prefixes"), list)
+    ):
+        raise _manifest_refusal("the manifest fields are malformed")
+    exact = payload["exact_paths"]
+    prefixes = payload["top_level_prefixes"]
+    if len(exact) + len(prefixes) > MAX_ORACLE_EXCLUSION_ENTRIES:
+        raise _manifest_refusal(
+            f"the manifest exceeds {MAX_ORACLE_EXCLUSION_ENTRIES} entries"
+        )
+    if (
+        any(not _canonical_relative(item) for item in exact)
+        or len(set(exact)) != len(exact)
+    ):
+        raise _manifest_refusal("exact_paths must be unique canonical file paths")
+    if any(item.split("/", 1)[0] in _IGNORED_TOP_LEVEL for item in exact):
+        raise _manifest_refusal("exact_paths must remain inside the frozen surface")
+    for item in exact:
+        candidate = Path(root) / item
+        if candidate.exists() and (
+            candidate.is_dir() or _is_junction(candidate)
+        ):
+            raise _manifest_refusal("exact_paths must name files, not directories")
+    checked_prefixes: list[str] = []
+    for item in prefixes:
+        if not isinstance(item, str) or not item.endswith("/"):
+            raise _manifest_refusal(
+                "top_level_prefixes must be unique top-level directories ending in '/'"
+            )
+        directory = item[:-1]
+        if (
+            not _canonical_relative(directory)
+            or len(PurePosixPath(directory).parts) != 1
+            or directory in _IGNORED_TOP_LEVEL
+        ):
+            raise _manifest_refusal(
+                "top_level_prefixes must be unique top-level directories ending in '/'"
+            )
+        checked_prefixes.append(item)
+    if len(set(checked_prefixes)) != len(checked_prefixes):
+        raise _manifest_refusal(
+            "top_level_prefixes must be unique top-level directories ending in '/'"
+        )
+    if any(manifest_relative == item for item in exact) or any(
+        manifest_relative.startswith(prefix) for prefix in checked_prefixes
+    ):
+        raise _manifest_refusal("the manifest cannot exclude its own frozen bytes")
+    if any(
+        exact_path.startswith(prefix)
+        for exact_path in exact
+        for prefix in checked_prefixes
+    ):
+        raise _manifest_refusal(
+            "exact_paths cannot duplicate a declared top-level prefix"
+        )
+    if any(
+        required in exact
+        or any(required.startswith(prefix) for prefix in checked_prefixes)
+        for required in _REQUIRED_ORACLE_PATHS
+    ):
+        raise _manifest_refusal("the manifest cannot exclude a required oracle input")
+    return _OracleExclusions(frozenset(exact), tuple(sorted(checked_prefixes)))
+
+
+def _manifest_refusal(message: str) -> BoundarySnapshotRefusal:
+    return BoundarySnapshotRefusal(
+        "oracle_exclusion_manifest_invalid",
+        f"pass boundary not frozen; {message}; nothing was excluded",
+    )
+
+
+def _streamed_file_summary(path: Path) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _excluded_directory_summary(path: Path) -> tuple[int, str]:
+    if path.is_symlink() or _is_junction(path) or not path.is_dir():
+        raise _manifest_refusal(
+            f"declared top-level prefix '{path.name}/' is not an ordinary directory"
+        )
+    digest = hashlib.sha256()
+    total_size = 0
+    def walk_error(error: OSError) -> None:
+        raw_path = Path(error.filename) if error.filename else path
+        try:
+            relative = raw_path.relative_to(path).as_posix()
+        except ValueError:
+            relative = raw_path.name or path.name
+        raise BoundarySnapshotRefusal(
+            "artifact_unreadable",
+            f"pass boundary not frozen; excluded input "
+            f"'{path.name}/{relative}' is unreadable",
+        )
+
+    for current, dirnames, filenames in os.walk(path, onerror=walk_error):
+        dirnames.sort()
+        filenames.sort()
+        current_path = Path(current)
+        for name in tuple(dirnames):
+            candidate = current_path / name
+            if candidate.is_symlink() or _is_junction(candidate):
+                raise _manifest_refusal(
+                    f"declared top-level prefix '{path.name}/' contains a link-like directory"
+                )
+        for name in filenames:
+            candidate = current_path / name
+            relative = candidate.relative_to(path).as_posix()
+            try:
+                if candidate.is_symlink():
+                    target = str(os.readlink(candidate)).encode(
+                        "utf-8", errors="surrogatepass"
+                    )
+                    size = len(target)
+                    member_sha256 = hashlib.sha256(b"symlink:" + target).hexdigest()
+                else:
+                    size, member_sha256 = _streamed_file_summary(candidate)
+            except OSError:
+                raise BoundarySnapshotRefusal(
+                    "artifact_unreadable",
+                    "pass boundary not frozen; excluded input "
+                    f"'{path.name}/{relative}' is unreadable",
+                ) from None
+            summary = json.dumps(
+                {
+                    "path": relative,
+                    "sha256": member_sha256,
+                    "size_bytes": size,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            digest.update(summary + b"\n")
+            total_size += size
+    return total_size, digest.hexdigest()
+
+
+def _boundary_refusal_message(
+    offenders: list[tuple[str, int]], *, reason: str
+) -> str:
+    ordered = sorted(set(offenders))
+    rendered: list[str] = []
+    used = 0
+    for path, size in ordered:
+        item = f"'{path}' ({size} bytes)"
+        if used + len(item) + 2 > _MAX_BOUNDARY_DIAGNOSTIC_BYTES // 2:
+            rendered.append(f"... {len(ordered) - len(rendered)} additional paths")
+            break
+        rendered.append(item)
+        used += len(item) + 2
+    exact_candidates = sorted(path for path, _ in ordered if "/" not in path)
+    prefixes = sorted(
+        {f"{path.split('/', 1)[0]}/" for path, _ in ordered if "/" in path}
+    )
+    candidates: list[str] = []
+    if exact_candidates:
+        candidates.append("exact_paths: " + ", ".join(exact_candidates))
+    if prefixes:
+        candidates.append("top_level_prefixes: " + ", ".join(prefixes))
+    return (
+        f"pass boundary not frozen; {reason}: {', '.join(rendered)}. "
+        "Declare top-level policy key 'oracle_exclusion_manifest' and list "
+        "only reviewed candidates under exact_paths or top_level_prefixes "
+        f"(candidate declarations: {'; '.join(candidates)}); nothing was "
+        "auto-excluded"
+    )

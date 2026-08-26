@@ -1,5 +1,6 @@
 """Phase B freeze, second-pass, owner routing, resolver, and crash tests."""
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -15,6 +16,7 @@ from frutlups_drive.runstore import RESOLUTION_MARKER_SUFFIX, RunStore, RunStore
 
 from _scenario import (
     ACTIVE_ROADMAP,
+    CODING_PROMPT,
     ROADMAP_BODY,
     SELF_REPORT,
     Scenario,
@@ -186,6 +188,158 @@ class PhaseBLoopTests(unittest.TestCase):
         self.assertEqual((result.kind, result.detail), ("acted", "verb:declare-rework"))
         self.assertEqual(len(writer.calls), 1)
         self.assertEqual(writer.calls[0]["rework_slices"], ("M001-S01",))
+
+    def test_fresh_lifecycle_drains_persisted_declaration_with_frozen_lineage(self):
+        project = build_project(self.root)
+        store = RunStore(project / ".frutlups_drive")
+        store.create_run(
+            "run_001", {"boundary": "roadmap_complete", "contract_version": 1}
+        )
+        store.append_event(
+            "run_001",
+            {"kind": "run_created", "t": 1.0, "boundary": "roadmap_complete"},
+        )
+        store.append_event(
+            "run_001",
+            {
+                "kind": "verb",
+                "t": 2.0,
+                "verb": "record-verdict",
+                "artifact": "05_governance/reviews/m001/accepted.md",
+                "slice": "M001-S01",
+            },
+        )
+        prompt_bytes = (project / CODING_PROMPT).read_bytes()
+        boundary = store.write_pass_boundary(
+            "run_001",
+            {
+                "contract_version": 1,
+                "run_id": "run_001",
+                "evidence": [],
+                "artifacts": [
+                    {
+                        "path": CODING_PROMPT,
+                        "sha256": hashlib.sha256(prompt_bytes).hexdigest(),
+                    }
+                ],
+            },
+        )
+        store.append_event(
+            "run_001",
+            {
+                "kind": "pass_boundary",
+                "t": 3.0,
+                "evidence_sha256": hashlib.sha256(boundary.read_bytes()).hexdigest(),
+                "evidence_members": 0,
+                "artifact_members": 1,
+            },
+        )
+        declaration_rel = (
+            "05_governance/rework_declarations/001_holistic_pass_001.json"
+        )
+        declaration = project / declaration_rel
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(
+            json.dumps(
+                {
+                    "contract_id": "frutlups.rework_declaration",
+                    "contract_version": "1",
+                    "declaration_sequence": 1,
+                    "pass_id": "holistic_pass_001",
+                    "baseline_prompt_sequence": 1,
+                    "slice_ids": ["M001-S01"],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        store.append_event(
+            "run_001",
+            {
+                "kind": "verb",
+                "t": 4.0,
+                "verb": "declare-rework",
+                "artifact": declaration_rel,
+                "slice": "",
+                "pass_id": "holistic_pass_001",
+                "slices": ["M001-S01"],
+            },
+        )
+        fresh = Scenario(
+            self.root,
+            project=project,
+            run_id="run_002",
+            states=[
+                payload("ready", "execute_coding_prompt"),
+                payload("ready", "frontier_recorded", actor="human"),
+            ],
+            coder=[
+                MockAgentAction(writes=((SELF_REPORT, "# Fresh drain\n"),))
+            ],
+        )
+
+        result = fresh.supervisor.run_until()
+
+        self.assertEqual((result.kind, result.detail), ("boundary", "slice_complete"))
+        self.assertEqual(fresh.supervisor._missing_worklist_slices(), ())
+        self.assertFalse(
+            any(
+                event["kind"] == "holistic_finding_unmappable"
+                for event in fresh.events()
+            )
+        )
+        attempt = fresh.store.list_attempts("run_002", "M001-S01")[0]
+        snapshot = fresh.store.read_accepted_snapshot(attempt)
+        self.assertEqual(
+            snapshot["pass_boundary_sha256"],
+            hashlib.sha256(boundary.read_bytes()).hexdigest(),
+        )
+
+    def test_persisted_id_without_frozen_lineage_remains_unmappable(self):
+        project = build_project(self.root)
+        declaration = (
+            project
+            / "05_governance/rework_declarations/001_holistic_pass_001.json"
+        )
+        declaration.parent.mkdir(parents=True)
+        declaration.write_text(
+            json.dumps(
+                {
+                    "contract_id": "frutlups.rework_declaration",
+                    "contract_version": "1",
+                    "declaration_sequence": 1,
+                    "pass_id": "holistic_pass_001",
+                    "baseline_prompt_sequence": 1,
+                    "slice_ids": ["M001-S01"],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        scenario = Scenario(
+            self.root,
+            project=project,
+            states=[payload("ready", "execute_coding_prompt")],
+            coder=[MockAgentAction(writes=((SELF_REPORT, "# must not run\n"),))],
+        )
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual(
+            result.stop_reason, StopReason.HOLISTIC_FINDINGS_UNMAPPABLE
+        )
+        self.assertEqual(
+            scenario.store.list_attempts("run_001", "M001-S01"), ()
+        )
+        event = next(
+            event
+            for event in scenario.events()
+            if event["kind"] == "holistic_finding_unmappable"
+        )
+        self.assertEqual(
+            (event["pass_id"], event["finding_id"], event["progress"]),
+            ("holistic_pass_001", "M001-S01", False),
+        )
 
     def test_freeze_findings_worklist_and_two_consecutive_clean_closure(self):
         states = [
@@ -442,9 +596,10 @@ class PhaseBLoopTests(unittest.TestCase):
         notes = scenario.project / "05_governance/human_owner_notes"
         notes.mkdir(parents=True, exist_ok=True)
         secret_prose = "this prose must never enter control flow"
-        (notes / "016_new.md").write_text(secret_prose, encoding="utf-8")
+        note = notes / "016_new.md"
+        note.write_text(secret_prose, encoding="utf-8")
         result = scenario.supervisor.tick()
-        self.assertEqual(result.stop_reason, StopReason.OWNER_NOTE)
+        self.assertEqual(result.stop_reason, StopReason.FRESH_RUN_REQUIRED)
         escalation = result.escalation_path.read_text(encoding="utf-8")
         self.assertIn("016_new.md", escalation)
         self.assertNotIn(secret_prose, escalation)
@@ -457,10 +612,68 @@ class PhaseBLoopTests(unittest.TestCase):
         note = notes / "015_existing.md"
         note.write_bytes(b"admission bytes\n")
         scenario = Scenario(self.root, project=project, states=[payload()])
-        note.write_bytes(b"changed bytes that remain uninterpreted\n")
+        changed = b"changed bytes that remain uninterpreted\n"
+        note.write_bytes(changed)
         result = scenario.supervisor.tick()
-        self.assertEqual(result.stop_reason, StopReason.OWNER_NOTE)
+        self.assertEqual(result.stop_reason, StopReason.FRESH_RUN_REQUIRED)
         self.assertIn("015_existing.md", result.detail)
+        expected_command = (
+            "python -m frutlups_drive run . --until slice_complete "
+            "--predecessor-run run_001"
+        )
+        expected_hash = hashlib.sha256(changed).hexdigest()
+        stop = next(
+            event for event in scenario.events() if event["kind"] == "stop"
+        )
+        self.assertEqual(
+            {
+                key: stop[key]
+                for key in (
+                    "reason",
+                    "fresh_launch_command",
+                    "controlling_note_sha256",
+                    "predecessor_run_id",
+                    "controlling_note",
+                )
+            },
+            {
+                "reason": "fresh_run_required",
+                "fresh_launch_command": expected_command,
+                "controlling_note_sha256": expected_hash,
+                "predecessor_run_id": "run_001",
+                "controlling_note": "015_existing.md",
+            },
+        )
+        escalation = result.escalation_path.read_text(encoding="utf-8")
+        for exact in (
+            'stop_reason = "fresh_run_required"',
+            "fresh_run_required = true",
+            f'fresh_launch_command = "{expected_command}"',
+            f'controlling_note_sha256 = "{expected_hash}"',
+            'predecessor_run_id = "run_001"',
+            "## Fresh Launch Command",
+            f"`{expected_command}`",
+            "Ordinary resume is refused for this lifecycle.",
+        ):
+            self.assertIn(exact, escalation)
+        scenario.supervisor._journal(
+            "memory_hook",
+            hook="liveness",
+            status="healthy",
+            reason="",
+            evidence="fixture",
+        )
+        before_resume = scenario.events()
+        refused = scenario.supervisor.resume()
+        self.assertEqual(
+            (refused.kind, refused.detail),
+            (
+                "refused",
+                "fresh_run_required: ordinary resume refused; "
+                f"launch: {expected_command}",
+            ),
+        )
+        self.assertEqual(scenario.events(), before_resume)
 
     def test_max_passes_stops_before_an_unbounded_review(self):
         policy = PHASE_B_POLICY.replace("max_passes = 3", "max_passes = 1")

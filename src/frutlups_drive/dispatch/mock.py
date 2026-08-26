@@ -33,6 +33,11 @@ class MockAgentAction:
     cost_usd: float | None = None
     tokens_in: int | None = None
     tokens_out: int | None = None
+    provider_duration_seconds: float | None = None
+    observed_duration_seconds: float | None = None
+    retry_class: str = "not_applicable"
+    cost_knowledge: str | None = None
+    capture_truncated: bool = False
     transcript: tuple[str, ...] = ("mock dispatch",)
     raise_error: bool = False
     changed_files_override: tuple[str, ...] | None = None
@@ -133,4 +138,13 @@ class MockAgentExecutor:
             tokens_in=action.tokens_in,
             tokens_out=action.tokens_out,
             cost_usd=cost_fact,
+            provider_duration_seconds=action.provider_duration_seconds,
+            observed_duration_seconds=action.observed_duration_seconds,
+            retry_class=action.retry_class,
+            cost_knowledge=(
+                action.cost_knowledge
+                if action.cost_knowledge is not None
+                else ("measured" if cost_fact is not None else "unknown")
+            ),
+            capture_truncated=action.capture_truncated,
         )

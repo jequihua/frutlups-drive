@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import time
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -51,6 +52,8 @@ COMPLETION = "05_governance/reviews/m001/roadmap_closure.md"
 
 EXTERNAL_POLICY = '''schema_version = "frutlups_drive_policy_v1"
 
+runtime_environment_bindings = [{name = "JAVA_TOOL_OPTIONS", value = "-Djava.io.tmpdir=.tmp"}]
+
 [target]
 stop_at = "roadmap_complete"
 max_slices = 5
@@ -79,6 +82,14 @@ max_report_repairs = 2
 max_total_cost_usd = 10.0
 max_wall_clock_minutes = 240
 max_consecutive_provider_failures = 3
+
+[reporting]
+currency = "EUR"
+external_provider_ceilings = [
+  {provider = "codex_cli", ceiling = 100},
+  {provider = "kimi_cli", ceiling = 100},
+  {provider = "claude_cli", ceiling = 100},
+]
 '''
 
 
@@ -96,7 +107,19 @@ class ProviderStubE2ETests(unittest.TestCase):
             EXTERNAL_POLICY, encoding="utf-8"
         )
         self.gate = self.root / "live_validation_gate.md"
-        self.gate.write_text(gate_markdown(), encoding="utf-8")
+        self.gate.write_text(
+            gate_markdown(
+                extra=(
+                    'runtime_environment_bindings = [{name = "JAVA_TOOL_OPTIONS", value = "-Djava.io.tmpdir=.tmp"}]\n'
+                    'reporting_currency = "EUR"\n'
+                    'external_provider_ceilings = ['
+                    '{provider = "codex_cli", ceiling = 100}, '
+                    '{provider = "kimi_cli", ceiling = 100}, '
+                    '{provider = "claude_cli", ceiling = 100}]'
+                )
+            ),
+            encoding="utf-8",
+        )
         self._write_fixture_sources()
         self._write_prompts()
         self._write_stub_and_binding()
@@ -133,8 +156,11 @@ class ProviderStubE2ETests(unittest.TestCase):
                 "# Coding round one\n\nRequired Reading:\n"
                 "- `CLAUDE.md`\n- `PROJECT_STATE.md`\n"
                 "- `00_brief/CONTEXT.md`\n"
-                "- `03_experiments/roadmap.md`\n"
-                "- `src/fruitmath.py`\n- `tests/test_fruitmath.py`\n\n"
+                "- `03_experiments/"
+                "roadmap.md`\n"
+                "- `src/"
+                "fruitmath.py`\n- `tests/"
+                "test_fruitmath.py`\n\n"
                 "Implement `clamp(value, lower, upper)` and its stdlib "
                 "unittest coverage. Write the self-report at "
                 f"`{SELF_REPORT}`.\n"
@@ -143,8 +169,11 @@ class ProviderStubE2ETests(unittest.TestCase):
                 "# Coding slice two\n\nRequired Reading:\n"
                 "- `CLAUDE.md`\n- `PROJECT_STATE.md`\n"
                 "- `00_brief/CONTEXT.md`\n"
-                "- `03_experiments/roadmap.md`\n"
-                "- `src/fruitmath.py`\n- `tests/test_fruitmath.py`\n\n"
+                "- `03_experiments/"
+                "roadmap.md`\n"
+                "- `src/"
+                "fruitmath.py`\n- `tests/"
+                "test_fruitmath.py`\n\n"
                 "Implement `arithmetic_mean(values)` with an empty-input "
                 "`ValueError` and its stdlib unittest coverage. Write the "
                 f"self-report at `{SELF_REPORT_2}`.\n"
@@ -178,7 +207,7 @@ else:
     prompt = args[args.index("--prompt") + 1]
     suffix = "_review_report.md"
 if role == "architect":
-    marker = "## Current Active Roadmap (verbatim)\\n\\n"
+    marker = "## Current Active Roadmap (verbatim)" + chr(10) * 2
     if marker not in prompt:
         raise SystemExit(4)
     proposal = prompt.split(marker, 1)[1].replace(
@@ -193,20 +222,22 @@ if role == "reviewer" and "holistic_review.json" in prompt:
     Path("holistic_review.json").write_bytes(b'{"findings":[]}')
     print('{"usage":"stub-subscription","tokens":7}')
     raise SystemExit(0)
-matches = [item for item in re.findall(r"`([^`]+\\.md)`", prompt)
+matches = [item for item in re.findall(r"`([^`]+[.]md)`", prompt)
            if item.endswith(suffix)]
 if not matches:
     raise SystemExit(4)
 target = Path(matches[-1])
 target.parent.mkdir(parents=True, exist_ok=True)
 if role == "coder":
-    content = "# Coder Self-Report\\n\\nIntent:\\nStub fixture work.\\n"
+    content = ("# Coder Self-Report" + chr(10) * 2 + "Intent:" + chr(10)
+               + "Stub fixture work." + chr(10))
 else:
     counter = Path("local_state/reviewer_count.txt")
     count = int(counter.read_text() or "0") if counter.exists() else 0
     counter.write_text(str(count + 1))
     verdict = "needs_work" if count == 0 else "pass"
-    content = f"# Review Report\\n\\nVerdict: {verdict} - stub fixture\\n"
+    content = (f"# Review Report{chr(10) * 2}Verdict: {verdict} - stub fixture"
+               + chr(10))
 target.write_text(content, encoding="utf-8")
 print('{"usage":"stub-subscription","tokens":7}')
 print("stub provider progress", file=sys.stderr)
@@ -223,7 +254,7 @@ print("stub provider progress", file=sys.stderr)
         )
 
         def value(path):
-            return json.dumps(str(path).replace("\\", "/"))
+            return json.dumps(str(path).replace(chr(92), "/"))
 
         binding = self.project / PROVIDER_BINDING_RELATIVE_PATH
         binding.write_text(
@@ -381,7 +412,11 @@ print("stub provider progress", file=sys.stderr)
             ],
         )
         collected = [event for event in events if event["kind"] == "collected"]
-        self.assertEqual([event["cost_usd"] for event in collected], [0.0] * 9)
+        self.assertEqual([event["cost_usd"] for event in collected], [None] * 9)
+        self.assertEqual(
+            [event["cost_knowledge"] for event in collected],
+            ["subscription_prepaid"] * 9,
+        )
         reconciliation = [
             event for event in events if event["kind"] == "reconciliation"
         ]
@@ -400,6 +435,18 @@ print("stub provider progress", file=sys.stderr)
         self.assertEqual(len(prompts), 9)
         for capture in captures:
             self.assertIn(b'"usage":"stub-subscription"', capture.read_bytes())
+        manifest_path = store.run_dir("run_001") / "manifest.toml"
+        manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            manifest["runtime_environment_binding_001_name"],
+            "JAVA_TOOL_OPTIONS",
+        )
+        self.assertEqual(
+            manifest["runtime_environment_binding_001_value_sha256"],
+            hashlib.sha256(b"-Djava.io.tmpdir=.tmp").hexdigest(),
+        )
+        self.assertEqual(manifest["reporting_currency"], "EUR")
+        self.assertNotIn("-Djava.io.tmpdir=.tmp", manifest_path.read_text(encoding="utf-8"))
 
     def test_relative_root_staged_run_and_resume_dispatch_absolute_workspaces(self):
         original_cwd = Path.cwd()
@@ -499,9 +546,14 @@ print("stub provider progress", file=sys.stderr)
         ]
         self.assertEqual(len(cost_facts), 1)
         self.assertEqual(cost_facts[0]["status"], "failed")
-        self.assertEqual(cost_facts[0]["cost_usd"], 0.0)
+        self.assertIsNone(cost_facts[0]["cost_usd"])
+        self.assertEqual(cost_facts[0]["cost_knowledge"], "subscription_prepaid")
         attempt = store.list_attempts("run_001", "M001-S01")[0]
-        self.assertEqual(store.read_result(attempt)["cost_usd"], 0.0)
+        self.assertIsNone(store.read_result(attempt)["cost_usd"])
+        self.assertEqual(
+            store.read_result(attempt)["cost_knowledge"],
+            "subscription_prepaid",
+        )
 
     def test_collected_transition_crash_resumes_without_redispatch(self):
         authority_patch = patch("frutlups_drive.cli.LIVE_GATE_PATH", self.gate)

@@ -11,6 +11,7 @@ from frutlups_drive.contracts import StopReason
 from frutlups_drive.dispatch.mock import MockAgentAction
 
 from _scenario import (
+    CODING_PROMPT,
     DEFAULT_VERBS,
     REVIEW_PROMPT,
     REVIEW_REPORT,
@@ -177,6 +178,73 @@ class RecoveryContractTests(unittest.TestCase):
         self.assertEqual(
             current.store.list_attempts("run_003", "M001-S01"), ()
         )
+
+    def test_rework_prompt_is_written_before_prior_evidence_adoption(self):
+        prior, _ = self.failed_prior_run()
+        fresh_prompt = "prompts/for_coding_agent/009_rework.md"
+        current = Scenario(
+            self.root,
+            project=prior.project,
+            run_id="run_003",
+            states=[
+                payload(
+                    "ready",
+                    "make_coding_prompt",
+                    actor="orchestrator",
+                    coding_prompt=CODING_PROMPT,
+                )
+            ],
+        )
+
+        class FreshPromptWriter:
+            def __init__(self, project):
+                self.project = project
+
+            def invoke(self, verb, declared_path):
+                self.assertion = (verb, declared_path)
+                target = self.project / fresh_prompt
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(
+                    "# Declaration-qualified rework\n", encoding="utf-8"
+                )
+                return target
+
+        writer = FreshPromptWriter(current.project)
+        current.supervisor._verb_writer = writer
+        current.supervisor._journal(
+            "verb",
+            verb="declare-rework",
+            artifact=(
+                "05_governance/rework_declarations/001_holistic_pass_001.json"
+            ),
+            slice="",
+            pass_id="holistic_pass_001",
+            slices=["M001-S01"],
+        )
+
+        result = current.supervisor.tick()
+
+        self.assertEqual((result.kind, result.detail), ("acted", "verb:make-coding-prompt"))
+        self.assertEqual(writer.assertion, ("make-coding-prompt", None))
+        self.assertEqual(
+            [event["kind"] for event in current.events() if event["kind"] == "adoption"],
+            [],
+        )
+        verbs = [
+            event for event in current.events() if event.get("kind") == "verb"
+        ]
+        self.assertEqual(
+            [(event["verb"], event["artifact"]) for event in verbs],
+            [
+                (
+                    "declare-rework",
+                    "05_governance/rework_declarations/"
+                    "001_holistic_pass_001.json",
+                ),
+                ("make-coding-prompt", fresh_prompt),
+            ],
+        )
+        self.assertTrue((current.project / fresh_prompt).is_file())
 
 
 if __name__ == "__main__":

@@ -14,7 +14,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
+import tempfile
 import time
 import tomllib
 from dataclasses import dataclass
@@ -79,6 +81,7 @@ from frutlups_drive.supervisor import (
 )
 from frutlups_drive.telemetry import (
     TelemetryRefusal,
+    derive_campaign_report,
     derive_report,
     render_json,
     render_text,
@@ -97,6 +100,7 @@ POLICY_FILENAME = "frutlups_drive.toml"
 LIVE_GATE_PATH = (
     Path(__file__).resolve().parents[3] / "06_infra" / "live_validation_gate.md"
 )
+_CAMPAIGN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 
 class CliRefusal(Exception):
@@ -184,6 +188,8 @@ def _parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="start a run until a boundary")
     run.add_argument("project", type=Path)
     run.add_argument("--until", required=True, choices=BOUNDARIES)
+    run.add_argument("--campaign-id")
+    run.add_argument("--predecessor-run")
 
     resume = commands.add_parser("resume", help="reconcile and continue a run")
     resume.add_argument("project", type=Path)
@@ -193,9 +199,11 @@ def _parser() -> argparse.ArgumentParser:
     stop = commands.add_parser("stop", help="create the STOP sentinel")
     stop.add_argument("project", type=Path)
 
-    report = commands.add_parser("report", help="derive telemetry from one run")
+    report = commands.add_parser("report", help="derive run or campaign telemetry")
     report.add_argument("project", type=Path)
-    report.add_argument("run_id")
+    report.add_argument("run_id", nargs="?")
+    report.add_argument("--campaign")
+    report.add_argument("--all", action="store_true", dest="all_runs")
     report.add_argument("--json", action="store_true")
     return parser
 
@@ -217,16 +225,46 @@ def _dispatch(namespace: argparse.Namespace) -> int:
     if namespace.command == "plan":
         return _plan(project, dry_run=bool(namespace.dry_run))
     if namespace.command == "report":
-        return _report(project, namespace.run_id, bool(namespace.json))
+        return _report(
+            project,
+            namespace.run_id,
+            bool(namespace.json),
+            campaign_id=namespace.campaign,
+            all_runs=bool(namespace.all_runs),
+        )
     if namespace.command == "run":
-        return _run(project, namespace.until)
+        return _run(
+            project,
+            namespace.until,
+            campaign_id=namespace.campaign_id,
+            predecessor_run_id=namespace.predecessor_run,
+        )
     if namespace.command == "resume":
         return _resume(project, namespace.run_id, namespace.until)
     raise CliRefusal("unknown_command", "command is not part of this milestone")
 
 
-def _report(project: Path, run_id: str, as_json: bool) -> int:
-    report = derive_report(RunStore(project / ".frutlups_drive"), run_id)
+def _report(
+    project: Path,
+    run_id: str | None,
+    as_json: bool,
+    *,
+    campaign_id: str | None,
+    all_runs: bool,
+) -> int:
+    selections = sum((run_id is not None, campaign_id is not None, all_runs))
+    if selections != 1:
+        raise CliRefusal(
+            "report_selection_invalid",
+            "select exactly one run id, --campaign CAMPAIGN_ID, or --all",
+        )
+    store = RunStore(project / ".frutlups_drive")
+    if run_id is not None:
+        report = derive_report(store, run_id)
+    else:
+        report = derive_campaign_report(
+            store, campaign_id=campaign_id, all_runs=all_runs
+        )
     sys.stdout.write(render_json(report) if as_json else render_text(report))
     return int(ExitCode.OK)
 
@@ -235,6 +273,24 @@ def _plan(project: Path, dry_run: bool = False) -> int:
     loaded = None
     try:
         loaded = load_execution_policy(project / POLICY_FILENAME)
+        external_seats = _policy_external_seats(loaded.policy)
+        executable_external_seats = all(
+            seat_executable_issue(policy_seat(loaded.policy, Role(role)))
+            is None
+            for role in external_seats
+            if role != "shadow_reviewer"
+        )
+        if "shadow_reviewer" in external_seats:
+            executable_external_seats = (
+                executable_external_seats
+                and seat_executable_issue(shadow_policy_seat(loaded.policy))
+                is None
+            )
+        if external_seats and executable_external_seats:
+            # Plan admission validates the same declared non-secret runtime
+            # bindings as run admission, without creating a store or loading
+            # credential values.
+            _authorized_gate(loaded.policy)
         policy_line = (
             f"policy: present (stop_at={loaded.policy.target.stop_at}, "
             f"coder adapter={loaded.policy.coder.adapter})"
@@ -248,11 +304,22 @@ def _plan(project: Path, dry_run: bool = False) -> int:
     if dry_run:
         _report_dry_run(project, loaded)
 
+    if loaded is not None and loaded.policy.frutlups.provider == "frutlups_cli":
+        state = _read_released_plan(project, loaded.policy)
+        print(
+            "planning check: released frutlups status read "
+            "(strict planning_frontier + loop_resume; no provider dispatch)"
+        )
+        _print_next_action(state)
+        return int(ExitCode.OK)
+
     script_dir = project / MOCK_CONVENTION_DIR
     if not (script_dir / "script.json").is_file():
+        print("planning check: mock script unavailable")
         print("next action: unavailable (no mock planning sequence)")
         return int(ExitCode.OK)
     compiled = _compile_mock_script(script_dir)
+    print("planning check: mock script .frutlups_drive_mock/script.json")
     position = _latest_tick_count(project)
     if position >= len(compiled.planstate_payloads):
         print("next action: none (planning sequence exhausted)")
@@ -260,9 +327,48 @@ def _plan(project: Path, dry_run: bool = False) -> int:
     state = MockPlanProvider(
         compiled.planstate_payloads[position:]
     ).read_planning_state()
-    step = state.step.value if state.step else "null"
-    print(f"next action: outcome={state.outcome.value} step={step}")
+    _print_next_action(state)
     return int(ExitCode.OK)
+
+
+def _read_released_plan(project: Path, policy):
+    policy_bytes = _confirmed_policy_bytes(project, policy)
+    binding = _required_binding(project, policy)
+    if binding is None:
+        raise CliRefusal(
+            "planning_provider_missing",
+            "the live-configured project has no released-frutlups binding",
+        )
+    # Plan validates the same executable, layout, package, policy, and finite
+    # environment identity as run admission. Captures live only in a disposable
+    # system temporary directory, so the driven project and its run store remain
+    # byte-read-only.
+    _build_launch_identity(project, policy, binding, policy_bytes)
+    with tempfile.TemporaryDirectory(prefix="frutlups-drive-plan-") as tmp:
+        _, provider = _admit_memory_mode(
+            project,
+            policy,
+            binding,
+            "plan",
+            capture_root=Path(tmp) / "status",
+        )
+        assert provider is not None
+        try:
+            return provider.read_planning_state()
+        except PlanProviderUnavailable as refusal:
+            raise CliRefusal(refusal.code, refusal.message) from None
+
+
+def _print_next_action(state) -> None:
+    step = state.step.value if state.step else "null"
+    if state.frontier is None:
+        frontier = "null"
+    else:
+        frontier = f"{state.frontier.milestone_id}/{state.frontier.slice_id}"
+    print(
+        f"next action: outcome={state.outcome.value} step={step} "
+        f"frontier={frontier}"
+    )
 
 
 def _report_dry_run(project: Path, loaded) -> int | None:
@@ -334,7 +440,13 @@ def _report_dry_run(project: Path, loaded) -> int | None:
     return None
 
 
-def _run(project: Path, boundary: str) -> int:
+def _run(
+    project: Path,
+    boundary: str,
+    *,
+    campaign_id: str | None = None,
+    predecessor_run_id: str | None = None,
+) -> int:
     authority = _required_run_authority(project)
     policy = authority.policy
     # R2-F2/R3-F1: the complete mock configuration is compiled into one
@@ -356,6 +468,12 @@ def _run(project: Path, boundary: str) -> int:
     )
     store = RunStore(project / ".frutlups_drive")
     run_id = store.next_run_id()
+    campaign_id, predecessor_run_id = _resolve_run_lineage(
+        store,
+        policy_campaign_id=policy.campaign_id,
+        launch_campaign_id=campaign_id,
+        requested_predecessor_run_id=predecessor_run_id,
+    )
     memory_mode, admitted_provider = _admit_memory_mode(
         project, policy, binding, run_id
     )
@@ -376,6 +494,10 @@ def _run(project: Path, boundary: str) -> int:
             seats["coder"], seats["reviewer"]
         ),
     }
+    if campaign_id is not None:
+        manifest["campaign_id"] = campaign_id
+    if predecessor_run_id is not None:
+        manifest["predecessor_run_id"] = predecessor_run_id
     for role_name, seat in seats.items():
         manifest[f"{role_name}_adapter"] = seat.adapter
         manifest[f"{role_name}_model"] = seat.model
@@ -383,6 +505,13 @@ def _run(project: Path, boundary: str) -> int:
     manifest["shadow_reviewer_enabled"] = policy.shadow_reviewer.enabled
     manifest["shadow_reviewer_adapter"] = shadow.adapter
     manifest["shadow_reviewer_model"] = shadow.model
+    if policy.reporting.currency is not None:
+        manifest["reporting_currency"] = policy.reporting.currency
+        for index, (provider, ceiling) in enumerate(
+            policy.reporting.external_provider_ceilings, 1
+        ):
+            manifest[f"external_provider_ceiling_{index:03d}_provider"] = provider
+            manifest[f"external_provider_ceiling_{index:03d}_amount"] = ceiling
     if authority.providers is not None:
         declaration = authority.live_gate.assessment.declaration
         if declaration is None:
@@ -399,9 +528,16 @@ def _run(project: Path, boundary: str) -> int:
     manifest.update(memory_mode.manifest_facts())
     manifest.update(llloom_binding.manifest_facts())
     store.create_run(run_id, manifest)
-    store.append_event(
-        run_id, {"kind": "run_created", "t": time.time(), "boundary": boundary}
-    )
+    run_created: dict[str, object] = {
+        "kind": "run_created",
+        "t": time.time(),
+        "boundary": boundary,
+    }
+    if campaign_id is not None:
+        run_created["campaign_id"] = campaign_id
+    if predecessor_run_id is not None:
+        run_created["predecessor_run_id"] = predecessor_run_id
+    store.append_event(run_id, run_created)
     memory_hooks = _build_memory_hooks(
         project,
         policy,
@@ -445,6 +581,8 @@ def _admit_memory_mode(
     policy,
     binding: "FrutlupsLaunchBinding | None",
     run_id: str,
+    *,
+    capture_root: Path | None = None,
 ) -> tuple[MemoryMode, "FrutlupsPlanProvider | None"]:
     """Observe and reconcile declaration authority before run creation."""
 
@@ -456,9 +594,8 @@ def _admit_memory_mode(
     provider = FrutlupsPlanProvider(
         argv=tuple(binding.argv_prefix) + ("status", ".", "--json"),
         cwd=project,
-        capture_root=(
-            project / "local_state" / "frutlups_transport" / run_id / "status"
-        ),
+        capture_root=capture_root
+        or (project / "local_state" / "frutlups_transport" / run_id / "status"),
         timeout_seconds=float(policy.frutlups.timeout_seconds or 120),
         runner=SubprocessRunner(clock),
         env=binding.env,
@@ -470,6 +607,83 @@ def _admit_memory_mode(
     reconcile_memory_mode(mode, policy)
     provider.bind_memory_mode(mode)
     return mode, provider
+
+
+def _resolve_run_lineage(
+    store: RunStore,
+    *,
+    policy_campaign_id: str | None,
+    launch_campaign_id: str | None,
+    requested_predecessor_run_id: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve opt-in campaign identity and one honest predecessor edge.
+
+    A fresh-run-required stop prepares an exact command carrying the explicit
+    ``--predecessor-run`` edge. Ordinary launches stay unlinked, and ordinary
+    ``resume`` continues the same run rather than inventing a second lifecycle.
+    """
+
+    campaign = _checked_campaign_id(launch_campaign_id)
+    if policy_campaign_id is not None:
+        if campaign is not None and campaign != policy_campaign_id:
+            raise CliRefusal(
+                "campaign_identity_conflict",
+                "the launch and policy declare different campaign ids",
+            )
+        campaign = policy_campaign_id
+
+    predecessor = requested_predecessor_run_id
+    if predecessor is not None:
+        try:
+            exists = store.run_exists(predecessor)
+        except RunStoreRefusal as refusal:
+            raise CliRefusal("predecessor_run_invalid", refusal.message) from None
+        if not exists:
+            raise CliRefusal(
+                "predecessor_run_missing",
+                "the declared predecessor run does not exist in this project",
+            )
+    if predecessor is not None:
+        predecessor_campaign = _manifest_campaign(store, predecessor)
+        if (
+            predecessor_campaign is not None
+            and campaign is not None
+            and predecessor_campaign != campaign
+        ):
+            raise CliRefusal(
+                "campaign_lineage_mismatch",
+                "the predecessor run belongs to a different campaign",
+            )
+        campaign = campaign or predecessor_campaign
+    return campaign, predecessor
+
+
+def _checked_campaign_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not _CAMPAIGN_ID.fullmatch(value):
+        raise CliRefusal(
+            "campaign_id_invalid",
+            "campaign id must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}",
+        )
+    return value
+
+
+def _manifest_campaign(store: RunStore, run_id: str) -> str | None:
+    value = _run_manifest(store, run_id).get("campaign_id")
+    return value if isinstance(value, str) and _CAMPAIGN_ID.fullmatch(value) else None
+
+
+def _run_manifest(store: RunStore, run_id: str) -> dict:
+    try:
+        return tomllib.loads(
+            (store.run_dir(run_id) / "manifest.toml").read_bytes().decode("utf-8")
+        )
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        raise CliRefusal(
+            "manifest_invalid",
+            f"run '{run_id}' has no readable strict TOML manifest",
+        ) from None
 
 
 def _build_memory_hooks(
@@ -800,6 +1014,43 @@ def _authorized_gate(policy) -> LoadedLiveGate:
             "equal the policy's external declarations; nothing was created, "
             "spawned, or spent",
         )
+    if (
+        tuple(policy.runtime_environment_bindings)
+        != declaration.runtime_environment_bindings
+    ):
+        raise CliRefusal(
+            "runtime_environment_binding_missing",
+            "the policy and live gate do not declare the same approved non-secret runtime environment bindings; nothing was created, spawned, or spent",
+        )
+    if (
+        tuple(policy.dispatch.role_call_ceiling_seconds)
+        != declaration.role_call_ceiling_seconds
+        or tuple(policy.dispatch.slice_call_ceiling_overrides)
+        != declaration.slice_call_ceiling_overrides
+    ):
+        raise CliRefusal(
+            "dispatch_ceiling_authority_mismatch",
+            "the policy and live gate do not declare the same role and slice call ceilings; nothing was created, spawned, or spent",
+        )
+    if (
+        policy.architect_corrective_turn_enabled
+        != declaration.architect_corrective_turn_enabled
+        or policy.max_architect_corrective_turns_per_run
+        != declaration.max_architect_corrective_turns_per_run
+    ):
+        raise CliRefusal(
+            "architect_corrective_turn_authority_mismatch",
+            "the policy and live gate do not declare the same architect corrective-turn enablement and per-run cap; nothing was created, spawned, or spent",
+        )
+    if (
+        policy.reporting.currency != declaration.reporting_currency
+        or tuple(policy.reporting.external_provider_ceilings)
+        != declaration.external_provider_ceilings
+    ):
+        raise CliRefusal(
+            "reporting_authority_mismatch",
+            "the policy and live gate do not declare the same reporting currency and external provider ceilings; nothing was created, spawned, or spent",
+        )
     return loaded
 
 
@@ -1074,6 +1325,19 @@ def _compile_mock_script(script_dir: Path) -> _CompiledMockScript:
                         cost_usd=entry.get("cost_usd"),
                         tokens_in=entry.get("tokens_in"),
                         tokens_out=entry.get("tokens_out"),
+                        provider_duration_seconds=entry.get(
+                            "provider_duration_seconds"
+                        ),
+                        observed_duration_seconds=entry.get(
+                            "observed_duration_seconds"
+                        ),
+                        retry_class=str(
+                            entry.get("retry_class", "not_applicable")
+                        ),
+                        cost_knowledge=entry.get("cost_knowledge"),
+                        capture_truncated=entry.get(
+                            "capture_truncated", False
+                        ),
                     )
                 )
             except ValueError:
@@ -1274,6 +1538,7 @@ def _build_supervisor(
                 seat.adapter,
                 SubprocessRunner(clock),
                 log_dir,
+                policy.dispatch.capture_truncation_disposition,
             )
         elif seat.adapter == "manual":
             executors[role] = ManualAgentExecutor(

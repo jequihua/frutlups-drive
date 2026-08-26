@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
+from frutlups_drive.contracts import CorrectiveFailureClass
 from frutlups_drive.workspace import FenceViolation, authorize_workspace_writes
 
 ORCHESTRATOR_VERBS = ("make-coding-prompt", "make-review-prompt", "record-verdict")
@@ -84,3 +85,23 @@ class MockVerbWriter:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content.encode("utf-8"))
         return target
+
+    def authorize_corrective_proposal(
+        self,
+        failure_class: CorrectiveFailureClass,
+        target: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """Offline stand-in for the released dry-run target check."""
+
+        if failure_class is CorrectiveFailureClass.REWORK_DECLARATION_MAPPING:
+            valid = target.startswith("05_governance/rework_declarations/")
+            valid = valid and isinstance(payload.get("pass_id"), str)
+        else:
+            valid = target.startswith(
+                ("prompts/for_coding_agent/", "prompts/for_review_agent/")
+            )
+        if not valid:
+            raise VerbAuthorityDenied(
+                (FenceViolation("corrective_target_invalid", target),)
+            )

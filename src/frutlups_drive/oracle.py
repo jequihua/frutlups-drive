@@ -114,7 +114,9 @@ def reconcile_pass_boundary(
     project = _checked_root(project_root, "project_root_unreadable")
     evidence = _checked_root(evidence_root, "evidence_root_unreadable")
     artifact_map = {
-        member["path"]: member["sha256"] for member in record["artifacts"]
+        member["path"]: member["sha256"]
+        for member in record["artifacts"]
+        if member.get("type") != "excluded"
     }
     evidence_map = {
         member["path"]: member["sha256"] for member in record["evidence"]
@@ -358,13 +360,24 @@ def _checked_boundary(payload: object) -> dict:
             )
         seen: set[str] = set()
         for member in members:
-            if (
-                not isinstance(member, dict)
-                or set(member) != {"path", "sha256"}
-                or not _canonical_relative(member.get("path"))
-                or not _sha256(member.get("sha256"))
-                or member["path"] in seen
-            ):
+            ordinary = (
+                isinstance(member, dict)
+                and set(member) == {"path", "sha256"}
+                and _canonical_relative(member.get("path"))
+                and _sha256(member.get("sha256"))
+            )
+            excluded = (
+                area == "artifacts"
+                and isinstance(member, dict)
+                and set(member)
+                == {"path", "sha256", "size_bytes", "type"}
+                and member.get("type") == "excluded"
+                and _excluded_boundary_path(member.get("path"))
+                and _sha256(member.get("sha256"))
+                and type(member.get("size_bytes")) is int
+                and member["size_bytes"] >= 0
+            )
+            if not (ordinary or excluded) or member["path"] in seen:
                 raise OracleRefusal(
                     "pass_boundary_invalid", f"the {area} inventory is malformed"
                 )
@@ -934,6 +947,15 @@ def _canonical_relative(value: object) -> bool:
         and path.as_posix() == value
         and all(part not in ("", ".", "..") for part in path.parts)
     )
+
+
+def _excluded_boundary_path(value: object) -> bool:
+    if _canonical_relative(value):
+        return True
+    if not isinstance(value, str) or not value.endswith("/"):
+        return False
+    directory = value[:-1]
+    return _canonical_relative(directory) and len(PurePosixPath(directory).parts) == 1
 
 
 def _sha256(value: object) -> bool:

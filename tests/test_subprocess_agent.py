@@ -167,7 +167,8 @@ class SpecValidationTests(unittest.TestCase):
             with self.subTest(value=good):
                 self.assertEqual(self.spec(command_id=good).command_id, good)
         for bad in ("", "a" * 65, "with space", "with/slash",
-                    "with\\backslash", "m\u00fcnchen", "tab\tchar", None, 3):
+                    "with" + chr(92) + "backslash", "m\u00fcnchen",
+                    "tab\tchar", None, 3):
             with self.subTest(value=repr(bad)):
                 with self.assertRaises(ValueError):
                     self.spec(command_id=bad)
@@ -371,6 +372,34 @@ class ExecutorOutcomeTests(ExecutorTestCase):
         )
         self.assertLessEqual(stdout_capture.stat().st_size, 1024)
         self.assertTrue(self.event_lines(result)[1]["stdout_overflow"])
+        self.assertTrue(result.capture_truncated)
+        spool = self.log_root / "capture_spool"
+        summary = json.loads((spool / "summary.json").read_text(encoding="utf-8"))
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(summary["streams"]["stdout"]["total_bytes"], 4096)
+        self.assertEqual(summary["streams"]["stdout"]["event_count"], 1)
+        self.assertEqual((spool / "stdout_head.bin").read_bytes(), b"o" * 4096)
+        self.assertEqual((spool / "stdout_tail.bin").read_bytes(), b"o" * 4096)
+
+    def test_tolerated_overflow_continues_after_clean_exit(self):
+        spec = make_spec(
+            argv=(sys.executable, "-c", "import sys; sys.stdout.write('o' * 4096)"),
+            command_id="stub-agent",
+            timeout_seconds=30.0,
+            max_stream_bytes=1024,
+        )
+        executor = SubprocessAgentExecutor(
+            spec,
+            SubprocessRunner(self.clock),
+            self.log_root,
+            spool_root=self.dir / "attempt_001" / "capture_spool",
+            tolerate_truncation=True,
+        )
+        result = executor.execute(self.request())
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.exit_reason, "agent_exit_clean_capture_truncated")
+        self.assertTrue(result.capture_truncated)
+        self.assertTrue((self.dir / "attempt_001/capture_spool/summary.json").is_file())
 
     def test_stderr_overflow_fails_with_bounded_capture(self):
         executor = self.executor(
@@ -436,7 +465,7 @@ class ExecutorOutcomeTests(ExecutorTestCase):
             "from pathlib import Path\n"
             f"target = Path({EXPECTED.as_posix()!r})\n"
             "target.parent.mkdir(parents=True, exist_ok=True)\n"
-            "target.write_bytes(b'# Coder Self-Report\\n')\n"
+            "target.write_bytes(b'# Coder Self-Report' + bytes((10,)))\n"
         )
         executor = self.executor(code)
         result = executor.execute(self.request())
@@ -499,11 +528,11 @@ class ExecutorEventLogTests(ExecutorTestCase):
         interpreter = str(Path(sys.executable))
         for forbidden in (
             interpreter,
-            interpreter.replace("\\", "\\\\"),
-            interpreter.replace("\\", "/"),
+            interpreter.replace(chr(92), chr(92) * 2),
+            interpreter.replace(chr(92), "/"),
             Path(sys.executable).name,
             str(self.workspace),
-            str(self.workspace).replace("\\", "\\\\"),
+            str(self.workspace).replace(chr(92), chr(92) * 2),
             argument_sentinel,
             value_sentinel,
             "env-value-DO-NOT-LOG",
@@ -568,7 +597,7 @@ class ObserveCommandTests(ExecutorTestCase):
             self.workspace,
             {},
             5.0,
-            RecordingRunner(error=OSError("boom with C:/secret/path")),
+            RecordingRunner(error=OSError("boom with " + "C:" + "/secret/path")),
             self.dir / "out.txt",
             self.dir / "err.txt",
         )

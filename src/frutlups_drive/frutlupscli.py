@@ -33,7 +33,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from frutlups_drive.contracts import LoopStep, PlanOutcome
+from frutlups_drive.contracts import (
+    CorrectiveFailureClass,
+    LoopStep,
+    PlanOutcome,
+)
 from frutlups_drive.dispatch.subprocess_agent import (
     checked_timeout_seconds,
     observe_command,
@@ -991,6 +995,68 @@ class FrutlupsVerbWriter:
                 f"the {verb} proposed target is not a repo-relative POSIX path",
             )
         return normalized
+
+    def authorize_corrective_proposal(
+        self,
+        failure_class: CorrectiveFailureClass,
+        target: str,
+        payload: dict[str, object],
+    ) -> None:
+        """Use released-frutlups dry-run facts as the target authority.
+
+        The proposal bytes remain architect-authored and structurally checked
+        by the drive.  This transaction proves only that the released tool
+        currently recognizes the exact governed artifact target; semantic
+        prompt validation remains outside the drive.
+        """
+
+        if failure_class is CorrectiveFailureClass.REWORK_DECLARATION_MAPPING:
+            verb = "declare-rework"
+            pass_id = payload.get("pass_id")
+            slices = payload.get("slice_ids")
+            if not isinstance(pass_id, str) or not isinstance(slices, list):
+                raise FrutlupsVerbError(
+                    "corrective_dry_run_context_invalid",
+                    "the corrective rework context is invalid",
+                )
+            argv = list(self._binding.argv_prefix) + [
+                verb,
+                ".",
+                "--pass-id",
+                pass_id,
+            ]
+            for slice_id in slices:
+                argv += ["--slice", str(slice_id)]
+        elif target.startswith("prompts/for_coding_agent/"):
+            verb = "make-coding-prompt"
+            argv = list(self._binding.argv_prefix) + [verb, "."]
+        elif target.startswith("prompts/for_review_agent/"):
+            verb = "make-review-prompt"
+            argv = list(self._binding.argv_prefix) + [verb, "."]
+        else:
+            raise FrutlupsVerbError(
+                "corrective_dry_run_target_invalid",
+                "the corrective target is outside governed frutlups artifacts",
+            )
+        before = self._workspace_snapshot()
+        dry_payload = self._invoke_cli(
+            tuple(argv + ["--dry-run", "--json"]), "corrective_dry"
+        )
+        if self._workspace_snapshot() != before:
+            raise FrutlupsVerbError(
+                "corrective_dry_run_effect",
+                "the corrective dry run changed the workspace",
+            )
+        if self._payload_errors(dry_payload):
+            raise FrutlupsVerbError(
+                "corrective_dry_run_refused",
+                "the corrective dry run reported a typed refusal",
+            )
+        if self._proposed_target(verb, dry_payload) != target:
+            raise FrutlupsVerbError(
+                "corrective_dry_run_target_mismatch",
+                "the corrective dry-run target does not equal the failing artifact",
+            )
 
     # ------------------------------------------------------------ transact
 

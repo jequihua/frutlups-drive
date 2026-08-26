@@ -14,7 +14,9 @@ import _bootstrap  # noqa: F401  (sys.path bootstrap, must precede package impor
 from frutlups_drive.contracts import (
     AgentRunRequest,
     AgentRunResult,
+    CorrectiveFailureClass,
     ExitCode,
+    LadderFailureClass,
     LoopStep,
     PlanOutcome,
     Role,
@@ -101,6 +103,31 @@ class EnumContractTests(unittest.TestCase):
             ],
         )
 
+    def test_ladder_failure_class_members(self):
+        self.assertEqual(
+            [(m.name, m.value) for m in LadderFailureClass],
+            [
+                ("PRODUCT_FINDING", "product_finding"),
+                ("TRANSPORT", "transport"),
+                ("ENVIRONMENT", "environment"),
+                ("PATH_CONTRACT", "path_contract"),
+                ("OPERATOR_KILL_SWITCH", "operator_kill_switch"),
+            ],
+        )
+
+    def test_corrective_failure_class_members(self):
+        self.assertEqual(
+            [(m.name, m.value) for m in CorrectiveFailureClass],
+            [
+                ("PROMPT_CONTRACT", "prompt_contract"),
+                ("PROMPT_ADOPTION", "prompt_adoption"),
+                (
+                    "REWORK_DECLARATION_MAPPING",
+                    "rework_declaration_mapping",
+                ),
+            ],
+        )
+
     def test_stop_reason_members(self):
         self.assertEqual(
             [(m.name, m.value) for m in StopReason],
@@ -121,6 +148,7 @@ class EnumContractTests(unittest.TestCase):
                 ("PROVIDER_FAILURE", "provider_failure"),
                 ("RUN_STORE_FULL", "run_store_full"),
                 ("OWNER_NOTE", "owner_note"),
+                ("FRESH_RUN_REQUIRED", "fresh_run_required"),
                 ("CONTRACT_VERSION_REFUSED", "contract_version_refused"),
                 ("HUMAN_GATE", "human_gate"),
                 (
@@ -131,7 +159,14 @@ class EnumContractTests(unittest.TestCase):
         )
 
     def test_enums_serialize_to_lowercase_values(self):
-        for enum_type in (PlanOutcome, LoopStep, Role, StopReason):
+        for enum_type in (
+            PlanOutcome,
+            LoopStep,
+            Role,
+            LadderFailureClass,
+            CorrectiveFailureClass,
+            StopReason,
+        ):
             for member in enum_type:
                 with self.subTest(member=member):
                     self.assertEqual(str(member), member.value)
@@ -221,6 +256,11 @@ class AgentRunResultTests(unittest.TestCase):
                 "tokens_in",
                 "tokens_out",
                 "cost_usd",
+                "provider_duration_seconds",
+                "observed_duration_seconds",
+                "retry_class",
+                "cost_knowledge",
+                "capture_truncated",
             ],
         )
 
@@ -244,6 +284,22 @@ class AgentRunResultTests(unittest.TestCase):
         self.assertEqual(hints["tokens_in"], int | None)
         self.assertEqual(hints["tokens_out"], int | None)
         self.assertEqual(hints["cost_usd"], float | None)
+        self.assertEqual(hints["provider_duration_seconds"], float | None)
+        self.assertEqual(hints["observed_duration_seconds"], float | None)
+        self.assertEqual(
+            hints["retry_class"],
+            Literal[
+                "not_applicable",
+                "provider_retryable",
+                "model_stream_active",
+                "scientific_subprocess_running",
+            ],
+        )
+        self.assertEqual(
+            hints["cost_knowledge"],
+            Literal["measured", "subscription_prepaid", "unknown"],
+        )
+        self.assertEqual(hints["capture_truncated"], bool)
 
     def test_frozen(self):
         self.assertTrue(AgentRunResult.__dataclass_params__.frozen)
@@ -266,6 +322,16 @@ class AgentRunResultTests(unittest.TestCase):
     def test_unknown_status_refused_at_construction(self):
         with self.assertRaises(ValueError):
             make_result(status="succeeded")
+
+    def test_result_knowledge_and_retry_vocabularies_are_closed(self):
+        with self.assertRaises(ValueError):
+            make_result(retry_class="retry")
+        with self.assertRaises(ValueError):
+            make_result(cost_knowledge="free")
+        with self.assertRaises(ValueError):
+            make_result(cost_knowledge="measured", cost_usd=None)
+        prepaid = make_result(cost_knowledge="subscription_prepaid")
+        self.assertIsNone(prepaid.cost_usd)
 
 
 if __name__ == "__main__":

@@ -219,12 +219,12 @@
 </style>
 <main>
 <header class="masthead">
-  <p class="eyebrow">Template v3 · frutlups · frutlups-drive</p>
+  <p class="eyebrow">Template v3.1.0 · frutlups · frutlups-drive</p>
   <h1>The Operator&rsquo;s Manual</h1>
   <p class="standfirst">How to open, initialize, and execute a fully autonomous,
   milestone-structured development project — with real model seats, bounded
   budgets, and a human hand on every irreversible decision.</p>
-  <p class="provenance">version 1 baseline · M006-S03 second-pass flow · canonical copy: 09_ops/operators_manual.md</p>
+  <p class="provenance">current through the version 5 implementation · closure/publication remain owner-ruled · canonical copy: 09_ops/operators_manual.md</p>
 </header>
 
 <nav class="toc" aria-label="Contents">
@@ -398,6 +398,16 @@ files at exactly the prompt-declared paths.
 After a crash, resume reconciles the pending declaration witness or observes
 the already-ready worklist without declaring twice. Each later non-clean pass
 uses its new pass number and a new append-only declaration.</p>
+<p>Version 5 makes that lifecycle explicit across runs. Every terminal
+non-repair coder round records a typed <code>ladder_event</code>:
+<code>product_finding</code> counts toward same-invariant recurrence, while
+<code>transport</code>, <code>environment</code>, <code>path_contract</code>, and
+<code>operator_kill_switch</code> remain visible but excluded. An immutable
+owner-note change stops as <code>fresh_run_required</code> and gives one exact
+<code>run ... --predecessor-run &lt;stopped_run&gt;</code> command. The successor
+manifest and start event record that edge and inherit the campaign id when no
+new id is declared. Ordinary <code>resume</code> continues the same run and
+creates no fictitious lineage.</p>
 <p>If a slice is deliberately under-specified, planning reports
 needs-specification and the <span class="seat">architect seat</span> gets
 exactly one guarded turn to propose a completed roadmap — published only if
@@ -410,14 +420,21 @@ are refused.)</p>
 <section id="s5">
 <h2><span class="n">5</span>Declaring the policy — seats, budgets, boundaries</h2>
 <p>The drive policy lives at the driven project root. A current-shape policy
-(the v1 closure campaign&rsquo;s real declarations plus the version 3
+(the v1 closure campaign&rsquo;s real declarations plus the version 3-5
 additions), annotated:</p>
-<pre><code>schema_version = "frutlups_drive_policy_v1"
-index_mode = "no-ledger"       <span class="cm"># or "human-ledger" (default when absent):
+  <pre><code>schema_version = "frutlups_drive_policy_v1"
+  index_mode = "no-ledger"       <span class="cm"># or "human-ledger" (default when absent):
                                # in no-ledger NOBODY keeps the reviews INDEX -
                                # it stays header-only, the manifest routes, and
-                               # any data row that appears trips the oracle.
-                               # Declare it for fully autonomous projects.</span>
+                                # any data row that appears trips the oracle.
+                                # Declare it for fully autonomous projects.</span>
+campaign_id = "v5-evaluation"  <span class="cm"># optional; --campaign-id may declare it</span>
+oracle_exclusion_manifest = "05_governance/oracle_exclusions.json"
+runtime_environment_bindings = [
+  {name = "JAVA_TOOL_OPTIONS", value = "-Djava.io.tmpdir=.tmp"}
+]
+architect_corrective_turn_enabled = false <span class="cm"># default-off; gate must match</span>
+max_architect_corrective_turns_per_run = 1
 
 [target]
 stop_at = "roadmap_complete"   <span class="cm"># or "slice_complete" for one-slice runs</span>
@@ -470,7 +487,41 @@ worktree_per_slice = false
 
 [frutlups]
 provider = "frutlups_cli"
-timeout_seconds = 120</code></pre>
+timeout_seconds = 120
+
+[dispatch]
+role_call_ceiling_seconds = {coder = 900, reviewer = 600}
+slice_call_ceiling_overrides = [
+  {slice_id = "M009-S05", ceiling_seconds = 1200}
+]
+scientific_subprocess_budget_seconds = 1800
+capture_truncation_disposition = "invalidate"
+
+[reporting]
+currency = "EUR"
+external_provider_ceilings = [
+  {provider = "codex_cli", ceiling = 100.0}
+]</code></pre>
+<p>The version 5 declarations are opt-in. Without a campaign declaration, the
+manifest and start event retain their historical shape. A campaign may instead
+come from <code>run --campaign-id</code>; conflicting policy and launch values
+refuse. The strict bounded exclusion JSON contains exactly
+<code>contract_version</code>, <code>exact_paths</code>, and
+<code>top_level_prefixes</code>. Excluded files or trees remain named, sized,
+and hashed in the frozen boundary while their content stays outside oracle
+reads. Nothing is inferred from <code>.gitignore</code>; malformed, link-like,
+self-excluding, protected, oversized, or non-canonical declarations refuse
+before freeze, with offending paths and candidate declarations reported.</p>
+<p>Runtime bindings are non-secret name/literal pairs. Manifests retain only the
+name and literal SHA-256, never the literal or any credential value/hash.
+Model-call ceilings resolve slice, role, then global; the scientific subprocess
+budget is independent. Policy and gate must match the bindings and model-call
+ceilings. Capture stays bounded at 1 MiB per stream: overflow retains a bounded
+summary and fixed 65,536-byte head/tail files. <code>invalidate</code> stops;
+<code>tolerate</code> can continue only after a real zero exit. Reporting
+currency and provider ceilings are facts, not enforcement. Measured,
+subscription-prepaid, and unknown cost remain distinct; prepaid and unknown
+carry null cost, never a misleading zero.</p>
 <div class="card">
 <span class="card-label">Per-milestone operation</span>
 A policy choice, not a special mode: <code>stop_at = "slice_complete"</code>
@@ -521,6 +572,11 @@ seats, dollar and time limits, credential environment names, rollback and
 kill-switch statements, and stop conditions. Drive assesses it at launch; any
 unknown field, missing approval, seat mismatch, or malformed value refuses with
 <code>live_authority_missing</code> — nothing created, spawned, or spent.</p>
+<p>Version 5 extends gate equality to approved non-secret runtime bindings,
+role/slice model-call ceilings, architect-corrective enablement and cap, and
+reporting currency/provider ceilings. The scientific-subprocess budget has no
+gate half because it only narrows offline verification. None of these
+declarations adds provider dispatch to <code>plan</code> or <code>report</code>.</p>
 <p>The gate location is resolved from the drive package: three package parents
 above the <code>frutlups_drive.cli</code> module, then
 <code>06_infra/live_validation_gate.md</code>. In a source checkout this is the
@@ -570,10 +626,12 @@ quality (an earlier, sharper holistic catch), not per-slice speed.</p>
 <p>All commands run with the drive environment&rsquo;s interpreter, against the
 driven project&rsquo;s path:</p>
 <pre><code>python -m frutlups_drive plan   &lt;project&gt; [--dry-run]
-python -m frutlups_drive run    &lt;project&gt; --until slice_complete|roadmap_complete
+python -m frutlups_drive run    &lt;project&gt; --until ... [--campaign-id ID] [--predecessor-run RUN]
 python -m frutlups_drive resume &lt;project&gt; &lt;run_id&gt; [--until ...]
 python -m frutlups_drive stop   &lt;project&gt;
-python -m frutlups_drive report &lt;project&gt; &lt;run_id&gt; [--json]</code></pre>
+python -m frutlups_drive report &lt;project&gt; &lt;run_id&gt; [--json]
+python -m frutlups_drive report &lt;project&gt; --campaign &lt;campaign_id&gt; [--json]
+python -m frutlups_drive report &lt;project&gt; --all [--json]</code></pre>
 <p>Every <code>run</code> and <code>resume</code> requires the project-local
 <code>.frutlups_drive_mock/script.json</code>, including runs whose seats are
 live. The name is historical: in a live project the script supplies
@@ -601,8 +659,13 @@ lane, the project root as its working directory, and a bounded timeout:</p>
 <p>The script is mandatory; only the mock rehearsal is optional.</p>
 <p>A sensible first session on a fresh project:</p>
 <ol>
-<li><code>plan</code> — read-only; confirms frutlups parses your roadmap and
-shows the next governed step. Fix the roadmap until this looks right.</li>
+<li><code>plan</code> — read-only and explicit about its evidence. In a
+<code>frutlups_cli</code> project it performs the same strict released-frutlups
+status observation trusted by <code>run</code>, reports outcome, frontier, and
+step, and says it checked <code>planning_frontier</code> plus
+<code>loop_resume</code>. Captures are disposable outside the project and no
+provider seat is dispatched. A mock project instead says it planned against
+<code>.frutlups_drive_mock/script.json</code>.</li>
 <li>A <strong>mock rehearsal</strong> if you want one: point the policy at mock
 seats and run offline; the loop shape exercises without any spend.</li>
 <li><code>run &lt;project&gt; --until slice_complete</code> — the first real
@@ -610,6 +673,12 @@ slice, then look at everything (section 10) before granting more.</li>
 <li>Then <code>--until roadmap_complete</code> for full autonomous milestone
 execution under your gate&rsquo;s budgets.</li>
 </ol>
+<p>Use one stable campaign id for related launches. Policy or
+<code>run --campaign-id</code> records it in the manifest and start event. The
+fresh command printed by <code>fresh_run_required</code> names
+<code>--predecessor-run</code>; absent a new campaign declaration, the successor
+inherits the predecessor&rsquo;s campaign. Never attach an unrelated run merely to
+make a report appear continuous.</p>
 <p>The run either reaches its boundary — <code>complete</code> after two clean
 holistic passes, or <code>slice_complete</code> — or
 <span class="stop-word">stops governed</span>, with a stop reason, a complete
@@ -632,13 +701,18 @@ always.</li>
 <li><strong>Captures</strong> — every seat turn keeps a four-file record
 (prompt, stdout, stderr, agent events) in the run&rsquo;s adapter-logs. This is
 your transcript-audit surface — v1 practice is to actually read them.</li>
-<li><strong>Telemetry</strong> — <code>report</code> renders reconciled
-counters (dispatches, outcomes, memory facts, verbs, verdicts, durations) as
-text or JSON; its error list must be empty.</li>
-<li><strong>Money and time</strong> — every attempt journals one cost/usage
-fact. Subscription CLIs journal a contractual $0.00; raw captures retain any
-provider-side estimates. Keep an append-only cost log per campaign and record
-both forms.</li>
+<li><strong>Telemetry</strong> — one run id renders one run;
+<code>--campaign</code> aggregates matching lifecycles and <code>--all</code>
+explicitly aggregates every retained run. The campaign story includes each
+boundary/stop, lineage, dispatch counts by role/model/effort, duration sums,
+stop taxonomy, recovery intervals, and cost knowledge. Historical absent
+fields remain absent. Text and JSON carry the same facts; a healthy store has
+an empty error list.</li>
+<li><strong>Money and time</strong> — measured usage has numeric cost;
+subscription CLIs use <code>subscription_prepaid</code> with null cost, and
+unavailable facts use <code>unknown</code> with null cost. Declared external
+ceilings appear beside known totals with an explicit unauditable statement
+when prepaid, unknown, or currency-mismatched usage prevents comparison.</li>
 <li><strong>The driven repo itself</strong> — <code>git status</code> shows
 exactly what the loop produced: implementations, self-reports, generated
 prompts, review reports, verdicts, roadmap edits. Anything else appearing there
@@ -658,6 +732,35 @@ finding ids for human adjudication; and the no-ledger pass-boundary oracle
 bundle is quiet — zero observations is healthy, and a
 <code>ledger_row_in_no_ledger_project</code> observation means a data row
 appeared in an INDEX nobody should be keeping.</p>
+<p><strong>Operator surfaces added in version 5</strong>:</p>
+<ul>
+<li>S01&rsquo;s <code>ladder_event</code> names the closed failure class,
+recurrence key, and counted fact. <code>fresh_run_required</code> names the
+controlling-note hash, predecessor, and exact fresh launch; ordinary resume is
+refused.</li>
+<li>S02 exclusion members remain visibly typed in the pass boundary.
+<code>path_violation</code> escalations list sorted code/path facts plus exact
+expected artifacts or allowed prefixes without broadening the fence.</li>
+<li>S03 dispatches name the effective model-call ceiling and source;
+verification timeouts name their independent scientific ceiling and measured
+duration. For overflow, read <code>capture_spool/summary.json</code> and the
+bounded head/tail files rather than assuming the missing middle. Cost knowledge
+and auditability remain explicit.</li>
+<li>S04&rsquo;s corrective architect turn is default-off. Only
+<code>prompt_contract</code>, <code>prompt_adoption</code>, and declaration-backed
+<code>rework_declaration_mapping</code> may trigger it; product findings and
+verification/seat failures may not. The architect can emit only one bounded
+<code>architect_corrective_proposal.json</code> in staging. Drive may apply its
+complete content only to the exact failing prompt or rework declaration after
+structural, accepted-history, sidecar, path-family, and released-frutlups
+dry-run target checks; roadmaps, registers, reviews, verdicts, and accepted
+history are unreachable. Read the <code>architect_corrective_turn</code> phases,
+proposal evidence/hash, before/after hashes or refusal, and the escalation
+section. Refusal preserves the original stop.</li>
+<li>S05 records <code>campaign_id</code> and
+<code>predecessor_run_id</code> only when known, and exposes the aggregate
+campaign report and truthful plan observation described above.</li>
+</ul>
 <div class="card stop">
 <span class="card-label">The kill switch</span>
 <code>stop &lt;project&gt;</code> writes a STOP sentinel; the supervisor halts
@@ -686,8 +789,9 @@ catching something real.
 <h2><span class="n">11</span>Talking to the architect</h2>
 <p>Two different &ldquo;architects&rdquo; exist, on purpose:</p>
 <p><strong>The runtime architect seat</strong> (Opus 5 in v1) is not a chat. It
-gets single guarded reconciliation turns during runs — one prompt, one
-proposal, published only through the guarded writer. You influence it through
+gets single guarded reconciliation turns and, only when the version 5 gate opts
+in, the narrow corrective turn described in section 10 — one prompt, one
+staged proposal, published only through the applicable guarded writer. You influence it through
 the roadmap you write and the guidance baked into the generated prompt; you
 audit it through its captures.</p>
 <p><strong>The project architect is your conversation</strong> — the
@@ -726,9 +830,9 @@ design — use it exactly as lazily as that allows.</p>
 </section>
 
 <footer>
-frutlups-drive 0.4.0 · frutlups 0.1.8 · llloom 0.1.2 · this page mirrors the
+  frutlups-drive 0.4.0 (version 5 implementation, pre-closure) · frutlups 0.1.8 · llloom 0.1.2 · this page mirrors the
 canonical runbook at 09_ops/operators_manual.md in the drive repository; the
-Markdown file is authoritative and carries the versions 3-4 deltas in full.
+  Markdown file is authoritative and carries the versions 3-5 deltas in full.
 </footer>
 </main>
 

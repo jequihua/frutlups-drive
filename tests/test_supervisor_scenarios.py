@@ -8,7 +8,7 @@ from pathlib import Path
 import _bootstrap  # noqa: F401  (sys.path bootstrap, must precede package imports)
 
 from frutlups_drive.budget import BudgetCounters
-from frutlups_drive.contracts import StopReason
+from frutlups_drive.contracts import LadderFailureClass, StopReason
 from frutlups_drive.dispatch.mock import MockAgentAction
 from frutlups_drive.runstore import RunStore
 from frutlups_drive.supervisor import EVENT_KINDS
@@ -628,6 +628,15 @@ class BudgetScenarioTests(ScenarioTestCase):
         self.assert_stop(result, StopReason.BUDGET_EXHAUSTED)
         self.assertIn("cost_authorization", result.detail)
         self.assertFalse((scenario.project / SELF_REPORT).exists())
+        event = next(
+            event
+            for event in scenario.events()
+            if event["kind"] == "ladder_event"
+        )
+        self.assertEqual(
+            (event["failure_class"], event["counted"]),
+            ("environment", False),
+        )
 
     def test_exact_positive_ceiling_stops_before_next_dispatch(self):
         # R1-F5: accumulated == maximum (> 0) is exhaustion, not headroom.
@@ -779,6 +788,100 @@ class BudgetScenarioTests(ScenarioTestCase):
 
 
 class LadderScenarioTests(ScenarioTestCase):
+    def test_excluded_failure_classes_do_not_advance_product_recurrence(self):
+        for failure_class in (
+            LadderFailureClass.TRANSPORT,
+            LadderFailureClass.ENVIRONMENT,
+            LadderFailureClass.PATH_CONTRACT,
+            LadderFailureClass.OPERATOR_KILL_SWITCH,
+        ):
+            with self.subTest(failure_class=failure_class.value):
+                scenario = Scenario(
+                    self.tmp / failure_class.value,
+                    states=[payload("ready", "execute_coding_prompt", round_=3)],
+                    coder=[CODER_WRITES_REPORT],
+                )
+                scenario.supervisor._journal(
+                    "ladder_event",
+                    slice="M001-S01",
+                    attempt="attempt_prior",
+                    failure_class=failure_class.value,
+                    recurrence_key=failure_class.value,
+                    counted=False,
+                )
+
+                result = scenario.supervisor.tick()
+
+                self.assertEqual(
+                    (result.kind, result.detail),
+                    ("acted", "coder_attempt_completed"),
+                )
+                events = [
+                    event
+                    for event in scenario.events()
+                    if event["kind"] == "ladder_event"
+                ]
+                self.assertEqual(
+                    (
+                        events[0]["failure_class"],
+                        events[0]["recurrence_key"],
+                        events[0]["counted"],
+                    ),
+                    (failure_class.value, failure_class.value, False),
+                )
+
+    def test_same_product_invariant_still_stops_at_round_three(self):
+        scenario = self.scenario(
+            states=[payload("ready", "execute_coding_prompt", round_=1)]
+        )
+        for number in (1, 2):
+            scenario.supervisor._journal(
+                "ladder_event",
+                slice="M001-S01",
+                attempt=f"attempt_{number:03d}",
+                failure_class=LadderFailureClass.PRODUCT_FINDING.value,
+                recurrence_key="product_finding:M001-S01",
+                counted=True,
+            )
+
+        result = scenario.supervisor.tick()
+
+        self.assert_stop(result, StopReason.LADDER_ROUND3)
+
+    def test_stream_overflow_is_journaled_as_excluded_transport(self):
+        scenario = self.scenario(
+            states=[payload("ready", "execute_coding_prompt")],
+            coder=[
+                MockAgentAction(
+                    status="failed", exit_reason="agent_stream_overflow"
+                )
+            ],
+        )
+
+        result = scenario.supervisor.tick()
+
+        self.assertEqual((result.kind, result.detail), ("acted", "attempt_failed"))
+        event = next(
+            event
+            for event in scenario.events()
+            if event["kind"] == "ladder_event"
+        )
+        self.assertEqual(
+            {
+                key: event[key]
+                for key in (
+                    "failure_class",
+                    "recurrence_key",
+                    "counted",
+                )
+            },
+            {
+                "failure_class": "transport",
+                "recurrence_key": "transport",
+                "counted": False,
+            },
+        )
+
     def test_accepted_history_does_not_consume_fresh_rework_ladder_rounds(self):
         project = build_project(self.tmp)
         store = RunStore(project / ".frutlups_drive")

@@ -32,6 +32,18 @@ _STOP_AT_VALUES = (
     "roadmap_complete",
     "pass_complete",
 )
+_TRUNCATION_DISPOSITIONS = ("invalidate", "tolerate")
+_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*")
+_BOUNDED_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_CURRENCY = re.compile(r"[A-Z]{3}")
+_DISPATCH_CALL_CEILING_ROLES = ("architect", "coder", "reviewer")
+_MAX_DISPATCH_CALL_CEILING_SECONDS = 604_800.0
+_MAX_ARCHITECT_CORRECTIVE_TURNS_PER_RUN = 8
+_SECRET_VALUE_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9]{8,}"),
+    re.compile(r"(?i)bearer\s+\S{8,}"),
+    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+"),
+)
 
 _SECRET_SEGMENTS = frozenset(
     {
@@ -173,9 +185,46 @@ class FrutlupsToolPolicy:
 
 
 @dataclass(frozen=True)
+class DispatchPolicy:
+    """Optional governed dispatch controls.
+
+    Empty role/slice tuples mean that the existing global call ceiling remains
+    authoritative.  Slice overrides win over role ceilings.  The scientific
+    subprocess budget is independent of model-call and artifact-watch time.
+    """
+
+    role_call_ceiling_seconds: tuple[tuple[str, float], ...]
+    slice_call_ceiling_overrides: tuple[tuple[str, float], ...]
+    scientific_subprocess_budget_seconds: float | None
+    capture_truncation_disposition: str
+
+    def call_ceiling(self, role: str, slice_id: str) -> tuple[float | None, str]:
+        slices = dict(self.slice_call_ceiling_overrides)
+        if slice_id in slices:
+            return slices[slice_id], "slice"
+        roles = dict(self.role_call_ceiling_seconds)
+        if role in roles:
+            return roles[role], "role"
+        return None, "global"
+
+
+@dataclass(frozen=True)
+class ReportingPolicy:
+    """External ceilings are reporting facts only; no budget gate consumes them."""
+
+    currency: str | None
+    external_provider_ceilings: tuple[tuple[str, float], ...]
+
+
+@dataclass(frozen=True)
 class ExecutionPolicy:
     schema_version: str
     index_mode: str
+    campaign_id: str | None
+    oracle_exclusion_manifest: str | None
+    runtime_environment_bindings: tuple[tuple[str, str], ...]
+    architect_corrective_turn_enabled: bool
+    max_architect_corrective_turns_per_run: int
     target: TargetPolicy
     architect: ArchitectPolicy
     coder: CoderPolicy
@@ -187,6 +236,8 @@ class ExecutionPolicy:
     network: NetworkPolicy
     memory: MemoryPolicy
     frutlups: FrutlupsToolPolicy
+    dispatch: DispatchPolicy
+    reporting: ReportingPolicy
 
 
 @dataclass(frozen=True)
@@ -205,13 +256,23 @@ class PolicyLoadResult:
 
 # Field spec: (kind, default, allowed). Kinds: "enum" (closed vocabulary),
 # "optional_enum" (closed vocabulary whose absent default is not journaled),
-# "fixed" (single-value fixed policy boundary), "fixed_false" (bool pinned to
-# false), "str", "bool", "count" (int >= 0), "positive_count", "level"
-# (int 1..4), "money" (finite number >= 0), bounded positive seconds, and a
-# bounded non-decreasing seconds schedule.
+# "optional_repo_path" (an absent-or-canonical project-local path whose absent
+# default is not journaled), "fixed" (single-value fixed policy boundary),
+# "fixed_false" (bool pinned to false), "str", "bool", "count" (int >= 0),
+# "positive_count", "level" (int 1..4), "money" (finite number >= 0), bounded
+# positive seconds, and a bounded non-decreasing seconds schedule.
 _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
     (): {
         "index_mode": ("optional_enum", "human-ledger", INDEX_MODES),
+        "campaign_id": ("optional_campaign_id", None, ()),
+        "oracle_exclusion_manifest": ("optional_repo_path", None, ()),
+        "runtime_environment_bindings": ("optional_env_bindings", (), ()),
+        "architect_corrective_turn_enabled": ("bool", False, ()),
+        "max_architect_corrective_turns_per_run": (
+            "corrective_turn_count",
+            1,
+            (),
+        ),
     },
     ("target",): {
         "stop_at": ("enum", "milestone_complete", _STOP_AT_VALUES),
@@ -322,6 +383,28 @@ _SPEC: dict[tuple[str, ...], dict[str, tuple[str, object, tuple[str, ...]]]] = {
             (),
         ),
     },
+    ("dispatch",): {
+        "role_call_ceiling_seconds": ("optional_role_seconds", (), ()),
+        "slice_call_ceiling_overrides": ("optional_slice_seconds", (), ()),
+        "scientific_subprocess_budget_seconds": (
+            "optional_positive_duration",
+            None,
+            (),
+        ),
+        "capture_truncation_disposition": (
+            "optional_enum",
+            "invalidate",
+            _TRUNCATION_DISPOSITIONS,
+        ),
+    },
+    ("reporting",): {
+        "currency": ("optional_currency", None, ()),
+        "external_provider_ceilings": (
+            "optional_provider_ceilings",
+            (),
+            (),
+        ),
+    },
 }
 
 _MISSING = object()
@@ -365,7 +448,18 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             dotted = ".".join((*section_path, key))
             if key not in table:
                 values[dotted] = default
-                if kind not in ("optional_effort", "optional_enum"):
+                if kind not in (
+                    "optional_effort",
+                    "optional_enum",
+                    "optional_campaign_id",
+                    "optional_repo_path",
+                    "optional_env_bindings",
+                    "optional_role_seconds",
+                    "optional_slice_seconds",
+                    "optional_positive_duration",
+                    "optional_currency",
+                    "optional_provider_ceilings",
+                ):
                     defaulted.append(dotted)
             else:
                 values[dotted] = _validate_field(dotted, kind, table[key], allowed)
@@ -398,9 +492,26 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
         except ProviderBindingError as refusal:
             raise PolicyRefusal(refusal.code, refusal.message) from None
 
+    reporting_currency = values["reporting.currency"]
+    reporting_ceilings = values["reporting.external_provider_ceilings"]
+    if bool(reporting_currency) != bool(reporting_ceilings):
+        raise PolicyRefusal(
+            "reporting_declaration_incomplete",
+            "reporting currency and external provider ceilings must be declared together",
+        )
+
     policy = ExecutionPolicy(
         schema_version=SCHEMA_VERSION,
         index_mode=values["index_mode"],
+        campaign_id=values["campaign_id"],
+        oracle_exclusion_manifest=values["oracle_exclusion_manifest"],
+        runtime_environment_bindings=values["runtime_environment_bindings"],
+        architect_corrective_turn_enabled=values[
+            "architect_corrective_turn_enabled"
+        ],
+        max_architect_corrective_turns_per_run=values[
+            "max_architect_corrective_turns_per_run"
+        ],
         target=TargetPolicy(
             stop_at=values["target.stop_at"],
             max_slices=values["target.max_slices"],
@@ -490,6 +601,26 @@ def load_execution_policy(path: Path | str) -> PolicyLoadResult:
             max_stream_bytes=values["frutlups.max_stream_bytes"],
             binding_path=values["frutlups.binding_path"],
         ),
+        dispatch=DispatchPolicy(
+            role_call_ceiling_seconds=values[
+                "dispatch.role_call_ceiling_seconds"
+            ],
+            slice_call_ceiling_overrides=values[
+                "dispatch.slice_call_ceiling_overrides"
+            ],
+            scientific_subprocess_budget_seconds=values[
+                "dispatch.scientific_subprocess_budget_seconds"
+            ],
+            capture_truncation_disposition=values[
+                "dispatch.capture_truncation_disposition"
+            ],
+        ),
+        reporting=ReportingPolicy(
+            currency=values["reporting.currency"],
+            external_provider_ceilings=values[
+                "reporting.external_provider_ceilings"
+            ],
+        ),
     )
     return PolicyLoadResult(
         policy=policy, defaulted=tuple(defaulted), warnings=tuple(warnings)
@@ -513,6 +644,104 @@ def _section_table(document: dict, section_path: tuple[str, ...]) -> dict:
 def _validate_field(
     dotted: str, kind: str, value: object, allowed: tuple[str, ...]
 ) -> object:
+    if kind == "optional_campaign_id":
+        if type(value) is not str or not _BOUNDED_ID.fullmatch(value):
+            raise PolicyRefusal(
+                "field_value_invalid",
+                f"policy key '{dotted}' must be a 1 to 64 character campaign id",
+            )
+        return value
+    if kind == "optional_env_bindings":
+        return _validate_environment_bindings(dotted, value)
+    if kind == "optional_role_seconds":
+        if type(value) is not dict or any(
+            role not in _DISPATCH_CALL_CEILING_ROLES for role in value
+        ):
+            raise PolicyRefusal(
+                "field_type_invalid",
+                f"policy key '{dotted}' must be a role-to-seconds inline table",
+            )
+        return tuple(
+            (role, _positive_duration(f"{dotted}.{role}", seconds))
+            for role, seconds in sorted(value.items())
+        )
+    if kind == "optional_slice_seconds":
+        if type(value) not in (list, tuple):
+            raise PolicyRefusal(
+                "field_type_invalid",
+                f"policy key '{dotted}' must be an array of slice ceiling tables",
+            )
+        result: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for item in value:
+            if type(item) is not dict or set(item) != {"slice_id", "ceiling_seconds"}:
+                raise PolicyRefusal(
+                    "field_type_invalid",
+                    f"policy key '{dotted}' entries must contain slice_id and ceiling_seconds",
+                )
+            slice_id = item["slice_id"]
+            if type(slice_id) is not str or not _BOUNDED_ID.fullmatch(slice_id):
+                raise PolicyRefusal(
+                    "field_value_invalid",
+                    f"policy key '{dotted}' has an invalid slice_id",
+                )
+            if slice_id in seen:
+                raise PolicyRefusal(
+                    "field_value_invalid",
+                    f"policy key '{dotted}' has a duplicate slice_id",
+                )
+            seen.add(slice_id)
+            result.append(
+                (
+                    slice_id,
+                    _positive_duration(
+                        f"{dotted}.{slice_id}", item["ceiling_seconds"]
+                    ),
+                )
+            )
+        return tuple(sorted(result))
+    if kind == "optional_positive_duration":
+        return _positive_duration(dotted, value)
+    if kind == "optional_currency":
+        if type(value) is not str or not _CURRENCY.fullmatch(value):
+            raise PolicyRefusal(
+                "field_value_invalid",
+                f"policy key '{dotted}' must be a three-letter uppercase reporting currency",
+            )
+        return value
+    if kind == "optional_provider_ceilings":
+        if type(value) not in (list, tuple):
+            raise PolicyRefusal(
+                "field_type_invalid",
+                f"policy key '{dotted}' must be an array of provider ceiling tables",
+            )
+        result: list[tuple[str, float]] = []
+        seen: set[str] = set()
+        for item in value:
+            if type(item) is not dict or set(item) != {"provider", "ceiling"}:
+                raise PolicyRefusal(
+                    "field_type_invalid",
+                    f"policy key '{dotted}' entries must contain provider and ceiling",
+                )
+            provider = item["provider"]
+            if type(provider) is not str or provider not in (
+                "api_call",
+                "claude_cli",
+                "codex_cli",
+                "kimi_cli",
+            ):
+                raise PolicyRefusal(
+                    "enum_value_unknown",
+                    f"policy key '{dotted}' names an unsupported provider",
+                )
+            if provider in seen:
+                raise PolicyRefusal(
+                    "field_value_invalid",
+                    f"policy key '{dotted}' has a duplicate provider",
+                )
+            seen.add(provider)
+            result.append((provider, _non_negative_money(dotted, item["ceiling"])))
+        return tuple(sorted(result))
     if kind == "optional_effort":
         if type(value) is not str:
             raise PolicyRefusal(
@@ -542,7 +771,7 @@ def _validate_field(
                 "field_type_invalid", f"policy key '{dotted}' must be a string"
             )
         return value
-    if kind in ("repo_path", "local_binding_path"):
+    if kind in ("repo_path", "local_binding_path", "optional_repo_path"):
         if type(value) is not str or not _canonical_policy_path(value):
             raise PolicyRefusal(
                 "field_value_invalid",
@@ -588,6 +817,18 @@ def _validate_field(
             raise PolicyRefusal(
                 "numeric_range_invalid",
                 f"policy key '{dotted}' must be positive",
+            )
+        return value
+    if kind == "corrective_turn_count":
+        if type(value) is not int:
+            raise PolicyRefusal(
+                "field_type_invalid", f"policy key '{dotted}' must be an integer"
+            )
+        if not 1 <= value <= _MAX_ARCHITECT_CORRECTIVE_TURNS_PER_RUN:
+            raise PolicyRefusal(
+                "numeric_range_invalid",
+                f"policy key '{dotted}' must be between 1 and "
+                f"{_MAX_ARCHITECT_CORRECTIVE_TURNS_PER_RUN}",
             )
         return value
     if kind == "positive_seconds":
@@ -652,6 +893,90 @@ def _validate_field(
             )
         return number
     raise AssertionError(f"unhandled spec kind: {kind}")
+
+
+def _positive_duration(dotted: str, value: object) -> float:
+    if type(value) not in (int, float):
+        raise PolicyRefusal(
+            "field_type_invalid", f"policy key '{dotted}' must be a number"
+        )
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number) or not (
+        0.0 < number <= _MAX_DISPATCH_CALL_CEILING_SECONDS
+    ):
+        raise PolicyRefusal(
+            "numeric_range_invalid",
+            f"policy key '{dotted}' must be positive and at most 604800 seconds",
+        )
+    return number
+
+
+def _non_negative_money(dotted: str, value: object) -> float:
+    if type(value) not in (int, float):
+        raise PolicyRefusal(
+            "field_type_invalid", f"policy key '{dotted}' must be a number"
+        )
+    try:
+        number = float(value)
+    except OverflowError:
+        number = math.inf
+    if not math.isfinite(number) or number < 0.0:
+        raise PolicyRefusal(
+            "numeric_range_invalid",
+            f"policy key '{dotted}' must be a non-negative finite number",
+        )
+    return number
+
+
+def _validate_environment_bindings(
+    dotted: str, value: object
+) -> tuple[tuple[str, str], ...]:
+    if type(value) not in (list, tuple):
+        raise PolicyRefusal(
+            "field_type_invalid",
+            f"policy key '{dotted}' must be an array of name/value tables",
+        )
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if type(item) is not dict or set(item) != {"name", "value"}:
+            raise PolicyRefusal(
+                "field_type_invalid",
+                f"policy key '{dotted}' entries must contain only name and value",
+            )
+        name = item["name"]
+        literal = item["value"]
+        if (
+            type(name) is not str
+            or not _ENV_NAME.fullmatch(name)
+            or _secret_shaped(name)
+        ):
+            raise PolicyRefusal(
+                "environment_binding_name_invalid",
+                f"policy key '{dotted}' contains an invalid non-secret environment name",
+            )
+        if name in seen:
+            raise PolicyRefusal(
+                "environment_binding_duplicate",
+                f"policy key '{dotted}' contains a duplicate environment name",
+            )
+        if (
+            type(literal) is not str
+            or not literal
+            or len(literal.encode("utf-8")) > 8192
+            or "\x00" in literal
+            or any(pattern.search(literal) for pattern in _SECRET_VALUE_PATTERNS)
+        ):
+            raise PolicyRefusal(
+                "environment_binding_value_invalid",
+                f"policy key '{dotted}' contains an invalid or secret-shaped literal",
+            )
+        seen.add(name)
+        result.append((name, literal))
+    return tuple(sorted(result))
 
 
 def _canonical_policy_path(value: str) -> bool:

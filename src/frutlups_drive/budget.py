@@ -66,6 +66,7 @@ class BudgetCounters:
         self.lifecycle_coder_collected: dict[str, int] = {}
         self.repair_dispatches: dict[str, int] = {}
         self.reconciliation_dispatches: dict[str, int] = {}
+        self.architect_corrective_turns = 0
         self.total_cost_usd = 0.0
         self.slices_completed = 0
         self.passes_completed = 0
@@ -96,9 +97,12 @@ class BudgetCounters:
                     self.coder_dispatches.get(slice_id, 0) + 1
                 )
             elif event.get("role") == "architect":
-                self.reconciliation_dispatches[slice_id] = (
-                    self.reconciliation_dispatches.get(slice_id, 0) + 1
-                )
+                if event.get("architect_corrective_turn") is True:
+                    self.architect_corrective_turns += 1
+                else:
+                    self.reconciliation_dispatches[slice_id] = (
+                        self.reconciliation_dispatches.get(slice_id, 0) + 1
+                    )
         elif kind == "verb":
             slices = event.get("slices")
             if event.get("verb") == "declare-rework" and isinstance(slices, list):
@@ -239,4 +243,14 @@ class BudgetGate:
             >= self._policy.limits.max_reconciliations_without_progress
         ):
             return (StopReason.NO_PROGRESS, "reconciliations_without_progress")
+        return None
+
+    def check_architect_corrective_turn(
+        self, counters: BudgetCounters
+    ) -> tuple[StopReason, str] | None:
+        if (
+            counters.architect_corrective_turns
+            >= self._policy.max_architect_corrective_turns_per_run
+        ):
+            return (StopReason.BUDGET_EXHAUSTED, "architect_corrective_turns")
         return None
