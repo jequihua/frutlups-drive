@@ -96,6 +96,7 @@ class RuntimeImportBoundaryTests(unittest.TestCase):
             import frutlups_drive.policy
             import frutlups_drive.reconciliation
             import frutlups_drive.runstore
+            import frutlups_drive.seam_consumer
             import frutlups_drive.supervisor
             import frutlups_drive.telemetry
             import frutlups_drive.verifier

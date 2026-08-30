@@ -1,0 +1,801 @@
+{
+  "cases": [
+    {
+      "argv": [
+        "-m",
+        "frutlups",
+        "corrective-publish",
+        "$PROJECT_ROOT",
+        "--sidecar",
+        "03_experiments/active_roadmap.slices.yaml",
+        "--prompt",
+        "prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md",
+        "--version",
+        "1"
+      ],
+      "expected_after": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "7e9282b426f4eda45bb52485706bc96aa7d7876bba01e6cfdd83929c1a43d1e6",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "sha256": "9a1003e6ae0a27e59763bbbf6ac18f77fc66475b13cbe9d1f27af2683109f8ff",
+          "state": "present"
+        }
+      },
+      "expected_before": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "state": "absent"
+        }
+      },
+      "expected_exit": 0,
+      "expected_stderr_class": "none",
+      "expected_stdout": {
+        "after": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "7e9282b426f4eda45bb52485706bc96aa7d7876bba01e6cfdd83929c1a43d1e6",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "state": "absent"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+            "sha256": "9a1003e6ae0a27e59763bbbf6ac18f77fc66475b13cbe9d1f27af2683109f8ff",
+            "state": "present"
+          }
+        },
+        "attempt": "002",
+        "before": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "state": "absent"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+            "state": "absent"
+          }
+        },
+        "mode": "publish",
+        "outcome": "published",
+        "proposal_sha256": "db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "receipt_sha256": "041c092d54dd00076970c9302beb9f79867adbddff60897846ee684e8bc8f6ec",
+        "refusal_codes": [],
+        "rendered_prompt": {
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md",
+          "sha256": "9a1003e6ae0a27e59763bbbf6ac18f77fc66475b13cbe9d1f27af2683109f8ff"
+        },
+        "schema": "frutlups.corrective_publication_receipt.v1",
+        "sidecar_entry": {
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "443e9c9d3cac5d3350feb5504a26e74ce294b021496c842fa244f2ed119a17f3"
+        },
+        "slice": "M002-S02",
+        "transaction_id": "cp.db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "version": 1
+      },
+      "id": "publish_clean_success",
+      "project_nodes": [
+        {
+          "content_utf8": "{\"ledger\": \"partial\", \"rows\": 4}\n",
+          "kind": "file",
+          "path": "01_data/evidence/m002_s02_attempt_001/partial_ledger.json",
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0"
+        },
+        {
+          "content_utf8": "# Active Roadmap\n\n### M001: Ledger\n\nStatus: active\n\nSlices:\n\n- M001-S01: Add the bounded route-cost ledger\n- M001-S02: Expose the ledger summary\n\n### M002: Route ledger re-acquisition\n\nStatus: planned\n\nSlices:\n\n- M002-S02: Re-acquire the paired route ledger under the bounded replay authority\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.md",
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa"
+        },
+        {
+          "content_utf8": "slice_prompt_contract_version: 1\nroadmap: active_roadmap.md\nslices:\n- slice: M001-S01\n  title: Add the bounded route-cost ledger\n  milestone: M001\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/002_m001_s01_dispatch.md\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Implement the route-cost ledger writer and cover it with table-driven tests.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/route_cost.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: modify\n  - path: 05_governance/reviews/m001_s01_route_cost_ledger_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No router policy change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The ledger records one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Ledger writer implemented and tested\n- slice: M001-S02\n  title: Expose the ledger summary\n  milestone: M001\n  authored_by: architect_reviewer\n  status: frozen\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Expose a read-only ledger summary command over the accepted ledger writer.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/summary.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: create_once\n  - path: 05_governance/reviews/m001_s02_ledger_summary_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No ledger schema change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The summary reports one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Summary command implemented and tested\n- slice: M002-S02\n  title: Re-acquire the paired route ledger under the bounded replay authority\n  milestone: M002\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  attempt: '001'\n  strictness: Level 4\n  mode: corrective repair\n  live: false\n  corrective: true\n  task: Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\n  active_workspaces:\n  - 01_data\n  - 05_governance\n  read_first:\n  - PROJECT_STATE.md\n  - 05_governance/human_owner_notes/003_m002_s02_authority.md\n  writes:\n  - path: 01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\n    artifact_type: evidence\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  - path: 05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  non_goals:\n  - No second replay under this authority\n  verification:\n  - python scripts/acquire_ledger.py --preflight\n  opening_gates:\n  - kind: owner_note\n    reference: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  external_inputs: none\n  candidate_identity: none\n  correction:\n    findings:\n    - id: AL2-F1\n      violated_invariant: a no-ledger project carries no ledger row\n      prior_disposition: open\n      authority_action: owner note 003 authorizes exactly one bounded replay\n      coder_obligation: re-acquire the ledger under the frozen envelope and cite the rows\n      closure_proof: nine admitted rows per arm in joined_ledger.json\n    prior_evidence:\n    - path: 01_data/evidence/m002_s02_attempt_001/partial_ledger.json\n      sha256: 86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\n    controlling_ruling: 05_governance/human_owner_notes/003_m002_s02_authority.md\n    closure_proof:\n    - Nine admitted rows per arm, or a preserved partial stop with the exact exception\n    claims_withdrawn: none\n    evidence_invalidated: none\n    minimum_rerun_set:\n    - the nine-case paired replay\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - Nine exact ledger rows per arm are admitted\n    closure_proof:\n    - joined_ledger.json with nine rows per arm\n  definition_of_done:\n  - Joined ledger written at the resolved evidence path\n  - Attempt-qualified self-report written\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.publish-tmp"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.rollback-tmp"
+        },
+        {
+          "content_utf8": "# Owner note 003\n\nOne bounded replay of the M002-S02 ledger acquisition is authorized.\n",
+          "kind": "file",
+          "path": "05_governance/human_owner_notes/003_m002_s02_authority.md",
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde"
+        },
+        {
+          "content_utf8": "# Bounded fixture layout for the frutlups drive seam corpus (M005-S02).\nroadmaps:\n  directory: 03_experiments\nprompts:\n  coding_prompt_dir: prompts/for_coding_agent\n  filename_pattern: '{sequence:03d}_{slug}.md'\nslice_prompt_contract:\n  version: 1\n  sidecar_suffix: .slices.yaml\n  rendered_sections_required:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  rendered_sections_conditional:\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  rendered_section_order:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  entry_status_values:\n  - frozen\n  - ready\n  authored_by_values:\n  - architect_reviewer\n  - human_owner\n  artifact_types:\n  - implementation\n  - test\n  - evidence\n  - analysis\n  - documentation\n  - fixture\n  - generated_output\n  - config\n  - self_report\n  - coding_prompt\n  - review_prompt\n  - review_report\n  - verdict_record\n  - acceptance_record\n  - routing_state\n  - framework_doc\n  - governance_record\n  role_owners:\n  - coder\n  - reviewer\n  - architect_reviewer\n  - human_owner\n  - runner\n  role_type_matrix:\n    coder:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - self_report\n    reviewer:\n    - review_prompt\n    - review_report\n    - evidence\n    - analysis\n    - documentation\n    architect_reviewer:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - coding_prompt\n    - review_prompt\n    - review_report\n    - verdict_record\n    - acceptance_record\n    - framework_doc\n    - governance_record\n    human_owner:\n    - documentation\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - acceptance_record\n    - governance_record\n    - framework_doc\n    - config\n    runner:\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - routing_state\n    - generated_output\n    - evidence\n  reserved_path_classification:\n    self_report: _self_report.md\n    review_report: _review_report.md\n    verdict_record: _verdict_record.md\n    review_prompt: prompts/for_review_agent/\n    coding_prompt: prompts/for_coding_agent/\n  retry_policies:\n  - create_once\n  - create_fresh_per_attempt\n  - modify\n  - append_only\n  attempt_token: '{attempt}'\n  gate_kinds:\n  - accepted_review\n  - owner_note\n  - artifact_exists\n  - artifact_identity\n  - pinned_external_release\n  - human_launch_word\n  - external_answer\n  cleanup_values:\n  - retain_until_closure\n  - delete_after_evidence\n  - quarantine\n  result_handling_values:\n  - preserve_and_stop\n  - preserve_and_continue\n  objective_status_values:\n  - achieved\n  - not_achieved\n  - not_applicable\n  - indeterminate\n  sentinels:\n  - TBD\n  - <value>\n  - <path>\n  - <one move>\n",
+          "kind": "file",
+          "path": "frutlups.layout.yaml",
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421"
+        },
+        {
+          "content_utf8": "# Coding Prompt M001-S01: Add the bounded route-cost ledger\n\nRendered prompt bytes for the payload case.\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/001_m001_s01_ledger.md",
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5"
+        },
+        {
+          "content_utf8": "# Coding Prompt M002-S02: attempt 001\n\n## Typed Entry\n\n```yaml\nslice: \"M002-S02\"\nattempt: \"001\"\n```\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/003_m002_s02_attempt_001.md",
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2"
+        },
+        {
+          "kind": "absent",
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md"
+        }
+      ],
+      "stdin_utf8": "{\"schema\": \"frutlups.corrective_publication_proposal.v1\", \"version\": 1, \"slice\": \"M002-S02\", \"sidecar_path\": \"03_experiments/active_roadmap.slices.yaml\", \"prompt_path\": \"prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md\", \"entry_template\": {\"slice\": \"M002-S02\", \"title\": \"Re-acquire the paired route ledger under the bounded replay authority\", \"milestone\": \"M002\", \"authored_by\": \"architect_reviewer\", \"status\": \"ready\", \"dispatch_authority\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"strictness\": \"Level 4\", \"mode\": \"corrective repair\", \"live\": false, \"corrective\": true, \"task\": \"Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\", \"active_workspaces\": [\"01_data\", \"05_governance\"], \"read_first\": [\"PROJECT_STATE.md\", \"05_governance/human_owner_notes/003_m002_s02_authority.md\"], \"writes\": [{\"path\": \"01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\", \"artifact_type\": \"evidence\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}, {\"path\": \"05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\", \"artifact_type\": \"self_report\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}], \"non_goals\": [\"No second replay under this authority\"], \"verification\": [\"python scripts/acquire_ledger.py --preflight\"], \"opening_gates\": [{\"kind\": \"owner_note\", \"reference\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\"}], \"external_inputs\": \"none\", \"candidate_identity\": \"none\", \"correction\": {\"findings\": [{\"id\": \"AL2-F1\", \"violated_invariant\": \"a no-ledger project carries no ledger row\", \"prior_disposition\": \"open\", \"authority_action\": \"owner note 003 authorizes exactly one bounded replay\", \"coder_obligation\": \"re-acquire the ledger under the frozen envelope and cite the rows\", \"closure_proof\": \"nine admitted rows per arm in joined_ledger.json\"}], \"prior_evidence\": [{\"path\": \"01_data/evidence/m002_s02_attempt_001/partial_ledger.json\", \"sha256\": \"86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\"}], \"controlling_ruling\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"closure_proof\": [\"Nine admitted rows per arm, or a preserved partial stop with the exact exception\"], \"claims_withdrawn\": \"none\", \"evidence_invalidated\": \"none\", \"minimum_rerun_set\": [\"the nine-case paired replay\"]}, \"execution_envelope\": \"none\", \"objective\": {\"success_criteria\": [\"Nine exact ledger rows per arm are admitted\"], \"closure_proof\": [\"joined_ledger.json with nine rows per arm\"]}, \"definition_of_done\": [\"Joined ledger written at the resolved evidence path\", \"Attempt-qualified self-report written\"]}}\n",
+      "verb": "corrective-publish"
+    },
+    {
+      "argv": [
+        "-m",
+        "frutlups",
+        "corrective-publish",
+        "$PROJECT_ROOT",
+        "--sidecar",
+        "03_experiments/active_roadmap.slices.yaml",
+        "--prompt",
+        "prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md",
+        "--version",
+        "1"
+      ],
+      "expected_after": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "5783a2674d838de4c3c50847554c658444e498873658e65dd9abee939f94b711",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "sha256": "b2134099386965ab12bfec064c7684f45535d81a0c5a7371b9dc4dca3777ec9c",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_003.md": {
+          "sha256": "53162a82d30879478b0f1ef31a51a4460fdf358d2adaed8614c80f75eb1a4eb3",
+          "state": "present"
+        }
+      },
+      "expected_before": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "sha256": "b2134099386965ab12bfec064c7684f45535d81a0c5a7371b9dc4dca3777ec9c",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_003.md": {
+          "state": "absent"
+        }
+      },
+      "expected_exit": 0,
+      "expected_stderr_class": "none",
+      "expected_stdout": {
+        "after": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "5783a2674d838de4c3c50847554c658444e498873658e65dd9abee939f94b711",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "state": "absent"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_003.md": {
+            "sha256": "53162a82d30879478b0f1ef31a51a4460fdf358d2adaed8614c80f75eb1a4eb3",
+            "state": "present"
+          }
+        },
+        "attempt": "003",
+        "before": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "state": "absent"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_003.md": {
+            "state": "absent"
+          }
+        },
+        "mode": "publish",
+        "outcome": "published",
+        "proposal_sha256": "db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "receipt_sha256": "98ecd91f38595227e9da449ba34cb16ee15d00b8729137b221f2a3a01a2b23fa",
+        "refusal_codes": [],
+        "rendered_prompt": {
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_003.md",
+          "sha256": "53162a82d30879478b0f1ef31a51a4460fdf358d2adaed8614c80f75eb1a4eb3"
+        },
+        "schema": "frutlups.corrective_publication_receipt.v1",
+        "sidecar_entry": {
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "219f7438e35ca75c3b7a5f69d8d8d16024a5eba43e05e7f7e4d1f3bd1d7252e8"
+        },
+        "slice": "M002-S02",
+        "transaction_id": "cp.db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "version": 1
+      },
+      "id": "publish_after_history_allocates_next_attempt",
+      "project_nodes": [
+        {
+          "content_utf8": "{\"ledger\": \"partial\", \"rows\": 4}\n",
+          "kind": "file",
+          "path": "01_data/evidence/m002_s02_attempt_001/partial_ledger.json",
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0"
+        },
+        {
+          "content_utf8": "# Active Roadmap\n\n### M001: Ledger\n\nStatus: active\n\nSlices:\n\n- M001-S01: Add the bounded route-cost ledger\n- M001-S02: Expose the ledger summary\n\n### M002: Route ledger re-acquisition\n\nStatus: planned\n\nSlices:\n\n- M002-S02: Re-acquire the paired route ledger under the bounded replay authority\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.md",
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa"
+        },
+        {
+          "content_utf8": "slice_prompt_contract_version: 1\nroadmap: active_roadmap.md\nslices:\n- slice: M001-S01\n  title: Add the bounded route-cost ledger\n  milestone: M001\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/002_m001_s01_dispatch.md\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Implement the route-cost ledger writer and cover it with table-driven tests.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/route_cost.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: modify\n  - path: 05_governance/reviews/m001_s01_route_cost_ledger_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No router policy change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The ledger records one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Ledger writer implemented and tested\n- slice: M001-S02\n  title: Expose the ledger summary\n  milestone: M001\n  authored_by: architect_reviewer\n  status: frozen\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Expose a read-only ledger summary command over the accepted ledger writer.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/summary.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: create_once\n  - path: 05_governance/reviews/m001_s02_ledger_summary_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No ledger schema change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The summary reports one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Summary command implemented and tested\n- slice: M002-S02\n  title: Re-acquire the paired route ledger under the bounded replay authority\n  milestone: M002\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  attempt: '001'\n  strictness: Level 4\n  mode: corrective repair\n  live: false\n  corrective: true\n  task: Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\n  active_workspaces:\n  - 01_data\n  - 05_governance\n  read_first:\n  - PROJECT_STATE.md\n  - 05_governance/human_owner_notes/003_m002_s02_authority.md\n  writes:\n  - path: 01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\n    artifact_type: evidence\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  - path: 05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  non_goals:\n  - No second replay under this authority\n  verification:\n  - python scripts/acquire_ledger.py --preflight\n  opening_gates:\n  - kind: owner_note\n    reference: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  external_inputs: none\n  candidate_identity: none\n  correction:\n    findings:\n    - id: AL2-F1\n      violated_invariant: a no-ledger project carries no ledger row\n      prior_disposition: open\n      authority_action: owner note 003 authorizes exactly one bounded replay\n      coder_obligation: re-acquire the ledger under the frozen envelope and cite the rows\n      closure_proof: nine admitted rows per arm in joined_ledger.json\n    prior_evidence:\n    - path: 01_data/evidence/m002_s02_attempt_001/partial_ledger.json\n      sha256: 86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\n    controlling_ruling: 05_governance/human_owner_notes/003_m002_s02_authority.md\n    closure_proof:\n    - Nine admitted rows per arm, or a preserved partial stop with the exact exception\n    claims_withdrawn: none\n    evidence_invalidated: none\n    minimum_rerun_set:\n    - the nine-case paired replay\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - Nine exact ledger rows per arm are admitted\n    closure_proof:\n    - joined_ledger.json with nine rows per arm\n  definition_of_done:\n  - Joined ledger written at the resolved evidence path\n  - Attempt-qualified self-report written\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.publish-tmp"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.rollback-tmp"
+        },
+        {
+          "content_utf8": "# Owner note 003\n\nOne bounded replay of the M002-S02 ledger acquisition is authorized.\n",
+          "kind": "file",
+          "path": "05_governance/human_owner_notes/003_m002_s02_authority.md",
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde"
+        },
+        {
+          "content_utf8": "# Bounded fixture layout for the frutlups drive seam corpus (M005-S02).\nroadmaps:\n  directory: 03_experiments\nprompts:\n  coding_prompt_dir: prompts/for_coding_agent\n  filename_pattern: '{sequence:03d}_{slug}.md'\nslice_prompt_contract:\n  version: 1\n  sidecar_suffix: .slices.yaml\n  rendered_sections_required:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  rendered_sections_conditional:\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  rendered_section_order:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  entry_status_values:\n  - frozen\n  - ready\n  authored_by_values:\n  - architect_reviewer\n  - human_owner\n  artifact_types:\n  - implementation\n  - test\n  - evidence\n  - analysis\n  - documentation\n  - fixture\n  - generated_output\n  - config\n  - self_report\n  - coding_prompt\n  - review_prompt\n  - review_report\n  - verdict_record\n  - acceptance_record\n  - routing_state\n  - framework_doc\n  - governance_record\n  role_owners:\n  - coder\n  - reviewer\n  - architect_reviewer\n  - human_owner\n  - runner\n  role_type_matrix:\n    coder:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - self_report\n    reviewer:\n    - review_prompt\n    - review_report\n    - evidence\n    - analysis\n    - documentation\n    architect_reviewer:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - coding_prompt\n    - review_prompt\n    - review_report\n    - verdict_record\n    - acceptance_record\n    - framework_doc\n    - governance_record\n    human_owner:\n    - documentation\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - acceptance_record\n    - governance_record\n    - framework_doc\n    - config\n    runner:\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - routing_state\n    - generated_output\n    - evidence\n  reserved_path_classification:\n    self_report: _self_report.md\n    review_report: _review_report.md\n    verdict_record: _verdict_record.md\n    review_prompt: prompts/for_review_agent/\n    coding_prompt: prompts/for_coding_agent/\n  retry_policies:\n  - create_once\n  - create_fresh_per_attempt\n  - modify\n  - append_only\n  attempt_token: '{attempt}'\n  gate_kinds:\n  - accepted_review\n  - owner_note\n  - artifact_exists\n  - artifact_identity\n  - pinned_external_release\n  - human_launch_word\n  - external_answer\n  cleanup_values:\n  - retain_until_closure\n  - delete_after_evidence\n  - quarantine\n  result_handling_values:\n  - preserve_and_stop\n  - preserve_and_continue\n  objective_status_values:\n  - achieved\n  - not_achieved\n  - not_applicable\n  - indeterminate\n  sentinels:\n  - TBD\n  - <value>\n  - <path>\n  - <one move>\n",
+          "kind": "file",
+          "path": "frutlups.layout.yaml",
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421"
+        },
+        {
+          "content_utf8": "# Coding Prompt M001-S01: Add the bounded route-cost ledger\n\nRendered prompt bytes for the payload case.\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/001_m001_s01_ledger.md",
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5"
+        },
+        {
+          "content_utf8": "# Coding Prompt M002-S02: attempt 001\n\n## Typed Entry\n\n```yaml\nslice: \"M002-S02\"\nattempt: \"001\"\n```\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/003_m002_s02_attempt_001.md",
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2"
+        },
+        {
+          "content_utf8": "# Coding Prompt M002-S02: attempt 002\n\n## Typed Entry\n\n```yaml\nslice: \"M002-S02\"\nattempt: \"002\"\n```\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md",
+          "sha256": "b2134099386965ab12bfec064c7684f45535d81a0c5a7371b9dc4dca3777ec9c"
+        },
+        {
+          "kind": "absent",
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_003.md"
+        }
+      ],
+      "stdin_utf8": "{\"schema\": \"frutlups.corrective_publication_proposal.v1\", \"version\": 1, \"slice\": \"M002-S02\", \"sidecar_path\": \"03_experiments/active_roadmap.slices.yaml\", \"prompt_path\": \"prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md\", \"entry_template\": {\"slice\": \"M002-S02\", \"title\": \"Re-acquire the paired route ledger under the bounded replay authority\", \"milestone\": \"M002\", \"authored_by\": \"architect_reviewer\", \"status\": \"ready\", \"dispatch_authority\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"strictness\": \"Level 4\", \"mode\": \"corrective repair\", \"live\": false, \"corrective\": true, \"task\": \"Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\", \"active_workspaces\": [\"01_data\", \"05_governance\"], \"read_first\": [\"PROJECT_STATE.md\", \"05_governance/human_owner_notes/003_m002_s02_authority.md\"], \"writes\": [{\"path\": \"01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\", \"artifact_type\": \"evidence\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}, {\"path\": \"05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\", \"artifact_type\": \"self_report\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}], \"non_goals\": [\"No second replay under this authority\"], \"verification\": [\"python scripts/acquire_ledger.py --preflight\"], \"opening_gates\": [{\"kind\": \"owner_note\", \"reference\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\"}], \"external_inputs\": \"none\", \"candidate_identity\": \"none\", \"correction\": {\"findings\": [{\"id\": \"AL2-F1\", \"violated_invariant\": \"a no-ledger project carries no ledger row\", \"prior_disposition\": \"open\", \"authority_action\": \"owner note 003 authorizes exactly one bounded replay\", \"coder_obligation\": \"re-acquire the ledger under the frozen envelope and cite the rows\", \"closure_proof\": \"nine admitted rows per arm in joined_ledger.json\"}], \"prior_evidence\": [{\"path\": \"01_data/evidence/m002_s02_attempt_001/partial_ledger.json\", \"sha256\": \"86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\"}], \"controlling_ruling\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"closure_proof\": [\"Nine admitted rows per arm, or a preserved partial stop with the exact exception\"], \"claims_withdrawn\": \"none\", \"evidence_invalidated\": \"none\", \"minimum_rerun_set\": [\"the nine-case paired replay\"]}, \"execution_envelope\": \"none\", \"objective\": {\"success_criteria\": [\"Nine exact ledger rows per arm are admitted\"], \"closure_proof\": [\"joined_ledger.json with nine rows per arm\"]}, \"definition_of_done\": [\"Joined ledger written at the resolved evidence path\", \"Attempt-qualified self-report written\"]}}\n",
+      "verb": "corrective-publish"
+    },
+    {
+      "argv": [
+        "-m",
+        "frutlups",
+        "corrective-publish",
+        "$PROJECT_ROOT",
+        "--sidecar",
+        "03_experiments/active_roadmap.slices.yaml",
+        "--prompt",
+        "prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md",
+        "--version",
+        "1"
+      ],
+      "expected_after": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "sha256": "9e3bdf4b074d58de8349b2cc05531017ae5fad531ad6488a1ed9b787eb0e5e71",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "state": "absent"
+        }
+      },
+      "expected_before": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "sha256": "9e3bdf4b074d58de8349b2cc05531017ae5fad531ad6488a1ed9b787eb0e5e71",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "state": "absent"
+        }
+      },
+      "expected_exit": 4,
+      "expected_stderr_class": "none",
+      "expected_stdout": {
+        "after": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "sha256": "9e3bdf4b074d58de8349b2cc05531017ae5fad531ad6488a1ed9b787eb0e5e71",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+            "state": "absent"
+          }
+        },
+        "attempt": "002",
+        "before": {
+          "03_experiments/active_roadmap.slices.yaml": {
+            "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+            "sha256": "9e3bdf4b074d58de8349b2cc05531017ae5fad531ad6488a1ed9b787eb0e5e71",
+            "state": "present"
+          },
+          "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+            "state": "absent"
+          },
+          "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+            "state": "absent"
+          }
+        },
+        "mode": "publish",
+        "outcome": "recovery_required",
+        "proposal_sha256": "db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "receipt_sha256": "76f8432968117bca91392a830108e226bbf75bb7cb4ebf1268c94cc950a53598",
+        "refusal_codes": [
+          "recovery_required"
+        ],
+        "rendered_prompt": {
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md",
+          "sha256": "9a1003e6ae0a27e59763bbbf6ac18f77fc66475b13cbe9d1f27af2683109f8ff"
+        },
+        "schema": "frutlups.corrective_publication_receipt.v1",
+        "sidecar_entry": {
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "443e9c9d3cac5d3350feb5504a26e74ce294b021496c842fa244f2ed119a17f3"
+        },
+        "slice": "M002-S02",
+        "transaction_id": "cp.db93dec80052a848d1e8ebd77a2385dc69e5ef82dde8c6ac7e8de4fdf905e326",
+        "version": 1
+      },
+      "id": "publish_recovery_required_preexisting_temporary",
+      "project_nodes": [
+        {
+          "content_utf8": "{\"ledger\": \"partial\", \"rows\": 4}\n",
+          "kind": "file",
+          "path": "01_data/evidence/m002_s02_attempt_001/partial_ledger.json",
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0"
+        },
+        {
+          "content_utf8": "# Active Roadmap\n\n### M001: Ledger\n\nStatus: active\n\nSlices:\n\n- M001-S01: Add the bounded route-cost ledger\n- M001-S02: Expose the ledger summary\n\n### M002: Route ledger re-acquisition\n\nStatus: planned\n\nSlices:\n\n- M002-S02: Re-acquire the paired route ledger under the bounded replay authority\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.md",
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa"
+        },
+        {
+          "content_utf8": "slice_prompt_contract_version: 1\nroadmap: active_roadmap.md\nslices:\n- slice: M001-S01\n  title: Add the bounded route-cost ledger\n  milestone: M001\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/002_m001_s01_dispatch.md\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Implement the route-cost ledger writer and cover it with table-driven tests.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/route_cost.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: modify\n  - path: 05_governance/reviews/m001_s01_route_cost_ledger_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No router policy change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The ledger records one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Ledger writer implemented and tested\n- slice: M001-S02\n  title: Expose the ledger summary\n  milestone: M001\n  authored_by: architect_reviewer\n  status: frozen\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Expose a read-only ledger summary command over the accepted ledger writer.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/summary.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: create_once\n  - path: 05_governance/reviews/m001_s02_ledger_summary_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No ledger schema change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The summary reports one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Summary command implemented and tested\n- slice: M002-S02\n  title: Re-acquire the paired route ledger under the bounded replay authority\n  milestone: M002\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  attempt: '001'\n  strictness: Level 4\n  mode: corrective repair\n  live: false\n  corrective: true\n  task: Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\n  active_workspaces:\n  - 01_data\n  - 05_governance\n  read_first:\n  - PROJECT_STATE.md\n  - 05_governance/human_owner_notes/003_m002_s02_authority.md\n  writes:\n  - path: 01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\n    artifact_type: evidence\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  - path: 05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  non_goals:\n  - No second replay under this authority\n  verification:\n  - python scripts/acquire_ledger.py --preflight\n  opening_gates:\n  - kind: owner_note\n    reference: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  external_inputs: none\n  candidate_identity: none\n  correction:\n    findings:\n    - id: AL2-F1\n      violated_invariant: a no-ledger project carries no ledger row\n      prior_disposition: open\n      authority_action: owner note 003 authorizes exactly one bounded replay\n      coder_obligation: re-acquire the ledger under the frozen envelope and cite the rows\n      closure_proof: nine admitted rows per arm in joined_ledger.json\n    prior_evidence:\n    - path: 01_data/evidence/m002_s02_attempt_001/partial_ledger.json\n      sha256: 86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\n    controlling_ruling: 05_governance/human_owner_notes/003_m002_s02_authority.md\n    closure_proof:\n    - Nine admitted rows per arm, or a preserved partial stop with the exact exception\n    claims_withdrawn: none\n    evidence_invalidated: none\n    minimum_rerun_set:\n    - the nine-case paired replay\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - Nine exact ledger rows per arm are admitted\n    closure_proof:\n    - joined_ledger.json with nine rows per arm\n  definition_of_done:\n  - Joined ledger written at the resolved evidence path\n  - Attempt-qualified self-report written\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018"
+        },
+        {
+          "content_utf8": "stale temporary\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.slices.yaml.publish-tmp",
+          "sha256": "9e3bdf4b074d58de8349b2cc05531017ae5fad531ad6488a1ed9b787eb0e5e71"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.rollback-tmp"
+        },
+        {
+          "content_utf8": "# Owner note 003\n\nOne bounded replay of the M002-S02 ledger acquisition is authorized.\n",
+          "kind": "file",
+          "path": "05_governance/human_owner_notes/003_m002_s02_authority.md",
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde"
+        },
+        {
+          "content_utf8": "# Bounded fixture layout for the frutlups drive seam corpus (M005-S02).\nroadmaps:\n  directory: 03_experiments\nprompts:\n  coding_prompt_dir: prompts/for_coding_agent\n  filename_pattern: '{sequence:03d}_{slug}.md'\nslice_prompt_contract:\n  version: 1\n  sidecar_suffix: .slices.yaml\n  rendered_sections_required:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  rendered_sections_conditional:\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  rendered_section_order:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  entry_status_values:\n  - frozen\n  - ready\n  authored_by_values:\n  - architect_reviewer\n  - human_owner\n  artifact_types:\n  - implementation\n  - test\n  - evidence\n  - analysis\n  - documentation\n  - fixture\n  - generated_output\n  - config\n  - self_report\n  - coding_prompt\n  - review_prompt\n  - review_report\n  - verdict_record\n  - acceptance_record\n  - routing_state\n  - framework_doc\n  - governance_record\n  role_owners:\n  - coder\n  - reviewer\n  - architect_reviewer\n  - human_owner\n  - runner\n  role_type_matrix:\n    coder:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - self_report\n    reviewer:\n    - review_prompt\n    - review_report\n    - evidence\n    - analysis\n    - documentation\n    architect_reviewer:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - coding_prompt\n    - review_prompt\n    - review_report\n    - verdict_record\n    - acceptance_record\n    - framework_doc\n    - governance_record\n    human_owner:\n    - documentation\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - acceptance_record\n    - governance_record\n    - framework_doc\n    - config\n    runner:\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - routing_state\n    - generated_output\n    - evidence\n  reserved_path_classification:\n    self_report: _self_report.md\n    review_report: _review_report.md\n    verdict_record: _verdict_record.md\n    review_prompt: prompts/for_review_agent/\n    coding_prompt: prompts/for_coding_agent/\n  retry_policies:\n  - create_once\n  - create_fresh_per_attempt\n  - modify\n  - append_only\n  attempt_token: '{attempt}'\n  gate_kinds:\n  - accepted_review\n  - owner_note\n  - artifact_exists\n  - artifact_identity\n  - pinned_external_release\n  - human_launch_word\n  - external_answer\n  cleanup_values:\n  - retain_until_closure\n  - delete_after_evidence\n  - quarantine\n  result_handling_values:\n  - preserve_and_stop\n  - preserve_and_continue\n  objective_status_values:\n  - achieved\n  - not_achieved\n  - not_applicable\n  - indeterminate\n  sentinels:\n  - TBD\n  - <value>\n  - <path>\n  - <one move>\n",
+          "kind": "file",
+          "path": "frutlups.layout.yaml",
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421"
+        },
+        {
+          "content_utf8": "# Coding Prompt M001-S01: Add the bounded route-cost ledger\n\nRendered prompt bytes for the payload case.\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/001_m001_s01_ledger.md",
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5"
+        },
+        {
+          "content_utf8": "# Coding Prompt M002-S02: attempt 001\n\n## Typed Entry\n\n```yaml\nslice: \"M002-S02\"\nattempt: \"001\"\n```\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/003_m002_s02_attempt_001.md",
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2"
+        },
+        {
+          "kind": "absent",
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md"
+        }
+      ],
+      "stdin_utf8": "{\"schema\": \"frutlups.corrective_publication_proposal.v1\", \"version\": 1, \"slice\": \"M002-S02\", \"sidecar_path\": \"03_experiments/active_roadmap.slices.yaml\", \"prompt_path\": \"prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md\", \"entry_template\": {\"slice\": \"M002-S02\", \"title\": \"Re-acquire the paired route ledger under the bounded replay authority\", \"milestone\": \"M002\", \"authored_by\": \"architect_reviewer\", \"status\": \"ready\", \"dispatch_authority\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"strictness\": \"Level 4\", \"mode\": \"corrective repair\", \"live\": false, \"corrective\": true, \"task\": \"Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\", \"active_workspaces\": [\"01_data\", \"05_governance\"], \"read_first\": [\"PROJECT_STATE.md\", \"05_governance/human_owner_notes/003_m002_s02_authority.md\"], \"writes\": [{\"path\": \"01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\", \"artifact_type\": \"evidence\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}, {\"path\": \"05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\", \"artifact_type\": \"self_report\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}], \"non_goals\": [\"No second replay under this authority\"], \"verification\": [\"python scripts/acquire_ledger.py --preflight\"], \"opening_gates\": [{\"kind\": \"owner_note\", \"reference\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\"}], \"external_inputs\": \"none\", \"candidate_identity\": \"none\", \"correction\": {\"findings\": [{\"id\": \"AL2-F1\", \"violated_invariant\": \"a no-ledger project carries no ledger row\", \"prior_disposition\": \"open\", \"authority_action\": \"owner note 003 authorizes exactly one bounded replay\", \"coder_obligation\": \"re-acquire the ledger under the frozen envelope and cite the rows\", \"closure_proof\": \"nine admitted rows per arm in joined_ledger.json\"}], \"prior_evidence\": [{\"path\": \"01_data/evidence/m002_s02_attempt_001/partial_ledger.json\", \"sha256\": \"86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\"}], \"controlling_ruling\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"closure_proof\": [\"Nine admitted rows per arm, or a preserved partial stop with the exact exception\"], \"claims_withdrawn\": \"none\", \"evidence_invalidated\": \"none\", \"minimum_rerun_set\": [\"the nine-case paired replay\"]}, \"execution_envelope\": \"none\", \"objective\": {\"success_criteria\": [\"Nine exact ledger rows per arm are admitted\"], \"closure_proof\": [\"joined_ledger.json with nine rows per arm\"]}, \"definition_of_done\": [\"Joined ledger written at the resolved evidence path\", \"Attempt-qualified self-report written\"]}}\n",
+      "verb": "corrective-publish"
+    },
+    {
+      "argv": [
+        "-m",
+        "frutlups",
+        "corrective-publish",
+        "$PROJECT_ROOT",
+        "--sidecar",
+        "03_experiments/active_roadmap.slices.yaml",
+        "--prompt",
+        "prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md",
+        "--version",
+        "2"
+      ],
+      "expected_after": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "state": "absent"
+        }
+      },
+      "expected_before": {
+        "01_data/evidence/m002_s02_attempt_001/partial_ledger.json": {
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.md": {
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml": {
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018",
+          "state": "present"
+        },
+        "03_experiments/active_roadmap.slices.yaml.publish-tmp": {
+          "state": "absent"
+        },
+        "03_experiments/active_roadmap.slices.yaml.rollback-tmp": {
+          "state": "absent"
+        },
+        "05_governance/human_owner_notes/003_m002_s02_authority.md": {
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde",
+          "state": "present"
+        },
+        "frutlups.layout.yaml": {
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/001_m001_s01_ledger.md": {
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/003_m002_s02_attempt_001.md": {
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2",
+          "state": "present"
+        },
+        "prompts/for_coding_agent/004_m002_s02_attempt_002.md": {
+          "state": "absent"
+        }
+      },
+      "expected_exit": 3,
+      "expected_stderr_class": "none",
+      "expected_stdout": {
+        "code": "unsupported_version",
+        "detail": "corrective-publish supports version 1 only",
+        "schema": "frutlups.drive_seam_refusal.v1",
+        "verb": "corrective-publish",
+        "version": 1
+      },
+      "id": "publish_unsupported_version",
+      "project_nodes": [
+        {
+          "content_utf8": "{\"ledger\": \"partial\", \"rows\": 4}\n",
+          "kind": "file",
+          "path": "01_data/evidence/m002_s02_attempt_001/partial_ledger.json",
+          "sha256": "86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0"
+        },
+        {
+          "content_utf8": "# Active Roadmap\n\n### M001: Ledger\n\nStatus: active\n\nSlices:\n\n- M001-S01: Add the bounded route-cost ledger\n- M001-S02: Expose the ledger summary\n\n### M002: Route ledger re-acquisition\n\nStatus: planned\n\nSlices:\n\n- M002-S02: Re-acquire the paired route ledger under the bounded replay authority\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.md",
+          "sha256": "b72672230e19c1168b424e482078e7f4c31b828660e0eea75a0b5c7e2195feaa"
+        },
+        {
+          "content_utf8": "slice_prompt_contract_version: 1\nroadmap: active_roadmap.md\nslices:\n- slice: M001-S01\n  title: Add the bounded route-cost ledger\n  milestone: M001\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/002_m001_s01_dispatch.md\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Implement the route-cost ledger writer and cover it with table-driven tests.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/route_cost.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: modify\n  - path: 05_governance/reviews/m001_s01_route_cost_ledger_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No router policy change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The ledger records one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Ledger writer implemented and tested\n- slice: M001-S02\n  title: Expose the ledger summary\n  milestone: M001\n  authored_by: architect_reviewer\n  status: frozen\n  strictness: Level 3\n  mode: normal implementation\n  live: false\n  corrective: false\n  task: Expose a read-only ledger summary command over the accepted ledger writer.\n  active_workspaces:\n  - 08_pkg\n  read_first:\n  - PROJECT_STATE.md\n  writes:\n  - path: 08_pkg/src/routing/summary.py\n    artifact_type: implementation\n    role_owner: coder\n    retry_policy: create_once\n  - path: 05_governance/reviews/m001_s02_ledger_summary_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_once\n  non_goals:\n  - No ledger schema change\n  verification:\n  - python -m unittest discover -s 08_pkg/tests\n  opening_gates: none\n  external_inputs: none\n  candidate_identity: none\n  correction: none\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - The summary reports one row per admitted route\n    closure_proof:\n    - A passing focused test run cited in the self-report\n  definition_of_done:\n  - Summary command implemented and tested\n- slice: M002-S02\n  title: Re-acquire the paired route ledger under the bounded replay authority\n  milestone: M002\n  authored_by: architect_reviewer\n  status: ready\n  dispatch_authority: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  attempt: '001'\n  strictness: Level 4\n  mode: corrective repair\n  live: false\n  corrective: true\n  task: Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\n  active_workspaces:\n  - 01_data\n  - 05_governance\n  read_first:\n  - PROJECT_STATE.md\n  - 05_governance/human_owner_notes/003_m002_s02_authority.md\n  writes:\n  - path: 01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\n    artifact_type: evidence\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  - path: 05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\n    artifact_type: self_report\n    role_owner: coder\n    retry_policy: create_fresh_per_attempt\n  non_goals:\n  - No second replay under this authority\n  verification:\n  - python scripts/acquire_ledger.py --preflight\n  opening_gates:\n  - kind: owner_note\n    reference: 05_governance/human_owner_notes/003_m002_s02_authority.md\n  external_inputs: none\n  candidate_identity: none\n  correction:\n    findings:\n    - id: AL2-F1\n      violated_invariant: a no-ledger project carries no ledger row\n      prior_disposition: open\n      authority_action: owner note 003 authorizes exactly one bounded replay\n      coder_obligation: re-acquire the ledger under the frozen envelope and cite the rows\n      closure_proof: nine admitted rows per arm in joined_ledger.json\n    prior_evidence:\n    - path: 01_data/evidence/m002_s02_attempt_001/partial_ledger.json\n      sha256: 86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\n    controlling_ruling: 05_governance/human_owner_notes/003_m002_s02_authority.md\n    closure_proof:\n    - Nine admitted rows per arm, or a preserved partial stop with the exact exception\n    claims_withdrawn: none\n    evidence_invalidated: none\n    minimum_rerun_set:\n    - the nine-case paired replay\n  execution_envelope: none\n  objective:\n    success_criteria:\n    - Nine exact ledger rows per arm are admitted\n    closure_proof:\n    - joined_ledger.json with nine rows per arm\n  definition_of_done:\n  - Joined ledger written at the resolved evidence path\n  - Attempt-qualified self-report written\n",
+          "kind": "file",
+          "path": "03_experiments/active_roadmap.slices.yaml",
+          "sha256": "2c5d2a81556ccfddbc7cb1d31a855f2d0fc162b8e570582d2a52d598896fe018"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.publish-tmp"
+        },
+        {
+          "kind": "absent",
+          "path": "03_experiments/active_roadmap.slices.yaml.rollback-tmp"
+        },
+        {
+          "content_utf8": "# Owner note 003\n\nOne bounded replay of the M002-S02 ledger acquisition is authorized.\n",
+          "kind": "file",
+          "path": "05_governance/human_owner_notes/003_m002_s02_authority.md",
+          "sha256": "172241557332378537d8b32307db8c3a896e68ecfe14e3c4419fd4f89790adde"
+        },
+        {
+          "content_utf8": "# Bounded fixture layout for the frutlups drive seam corpus (M005-S02).\nroadmaps:\n  directory: 03_experiments\nprompts:\n  coding_prompt_dir: prompts/for_coding_agent\n  filename_pattern: '{sequence:03d}_{slug}.md'\nslice_prompt_contract:\n  version: 1\n  sidecar_suffix: .slices.yaml\n  rendered_sections_required:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  rendered_sections_conditional:\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  rendered_section_order:\n  - Current State\n  - Active Workspaces\n  - Read First\n  - Memory Posture\n  - Task\n  - Implementation Discipline\n  - OKF Authoring\n  - Write Manifest\n  - Opening Gates\n  - External Repositories\n  - Correction Scope Map\n  - Candidate Identity\n  - Execution Envelope\n  - Objective And Closure Proof\n  - Non-Goals\n  - Verification\n  - Seat Conduct\n  - Self-Report\n  - Definition Of Done\n  - Typed Entry\n  entry_status_values:\n  - frozen\n  - ready\n  authored_by_values:\n  - architect_reviewer\n  - human_owner\n  artifact_types:\n  - implementation\n  - test\n  - evidence\n  - analysis\n  - documentation\n  - fixture\n  - generated_output\n  - config\n  - self_report\n  - coding_prompt\n  - review_prompt\n  - review_report\n  - verdict_record\n  - acceptance_record\n  - routing_state\n  - framework_doc\n  - governance_record\n  role_owners:\n  - coder\n  - reviewer\n  - architect_reviewer\n  - human_owner\n  - runner\n  role_type_matrix:\n    coder:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - self_report\n    reviewer:\n    - review_prompt\n    - review_report\n    - evidence\n    - analysis\n    - documentation\n    architect_reviewer:\n    - implementation\n    - test\n    - evidence\n    - analysis\n    - documentation\n    - fixture\n    - generated_output\n    - config\n    - coding_prompt\n    - review_prompt\n    - review_report\n    - verdict_record\n    - acceptance_record\n    - framework_doc\n    - governance_record\n    human_owner:\n    - documentation\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - acceptance_record\n    - governance_record\n    - framework_doc\n    - config\n    runner:\n    - coding_prompt\n    - review_prompt\n    - verdict_record\n    - routing_state\n    - generated_output\n    - evidence\n  reserved_path_classification:\n    self_report: _self_report.md\n    review_report: _review_report.md\n    verdict_record: _verdict_record.md\n    review_prompt: prompts/for_review_agent/\n    coding_prompt: prompts/for_coding_agent/\n  retry_policies:\n  - create_once\n  - create_fresh_per_attempt\n  - modify\n  - append_only\n  attempt_token: '{attempt}'\n  gate_kinds:\n  - accepted_review\n  - owner_note\n  - artifact_exists\n  - artifact_identity\n  - pinned_external_release\n  - human_launch_word\n  - external_answer\n  cleanup_values:\n  - retain_until_closure\n  - delete_after_evidence\n  - quarantine\n  result_handling_values:\n  - preserve_and_stop\n  - preserve_and_continue\n  objective_status_values:\n  - achieved\n  - not_achieved\n  - not_applicable\n  - indeterminate\n  sentinels:\n  - TBD\n  - <value>\n  - <path>\n  - <one move>\n",
+          "kind": "file",
+          "path": "frutlups.layout.yaml",
+          "sha256": "d2fe6ebb6fbc60d7717549a3fbb83c49067b3fd2446bd34c750445b5c82eb421"
+        },
+        {
+          "content_utf8": "# Coding Prompt M001-S01: Add the bounded route-cost ledger\n\nRendered prompt bytes for the payload case.\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/001_m001_s01_ledger.md",
+          "sha256": "d849b468463849534f3dd017a199324fa001197cb68063ab83d772e5205825a5"
+        },
+        {
+          "content_utf8": "# Coding Prompt M002-S02: attempt 001\n\n## Typed Entry\n\n```yaml\nslice: \"M002-S02\"\nattempt: \"001\"\n```\n",
+          "kind": "file",
+          "path": "prompts/for_coding_agent/003_m002_s02_attempt_001.md",
+          "sha256": "12b956a834f9acb60e1bafcef4de1ffa8b1221d31ec0f98adfe47c40181688b2"
+        },
+        {
+          "kind": "absent",
+          "path": "prompts/for_coding_agent/004_m002_s02_attempt_002.md"
+        }
+      ],
+      "stdin_utf8": "{\"schema\": \"frutlups.corrective_publication_proposal.v1\", \"version\": 1, \"slice\": \"M002-S02\", \"sidecar_path\": \"03_experiments/active_roadmap.slices.yaml\", \"prompt_path\": \"prompts/for_coding_agent/004_m002_s02_attempt_{attempt}.md\", \"entry_template\": {\"slice\": \"M002-S02\", \"title\": \"Re-acquire the paired route ledger under the bounded replay authority\", \"milestone\": \"M002\", \"authored_by\": \"architect_reviewer\", \"status\": \"ready\", \"dispatch_authority\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"strictness\": \"Level 4\", \"mode\": \"corrective repair\", \"live\": false, \"corrective\": true, \"task\": \"Run exactly one bounded paired replay and record the joined ledger. Preserve partial stop evidence verbatim.\", \"active_workspaces\": [\"01_data\", \"05_governance\"], \"read_first\": [\"PROJECT_STATE.md\", \"05_governance/human_owner_notes/003_m002_s02_authority.md\"], \"writes\": [{\"path\": \"01_data/evidence/m002_s02_attempt_{attempt}/joined_ledger.json\", \"artifact_type\": \"evidence\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}, {\"path\": \"05_governance/reviews/m002_s02_attempt_{attempt}_self_report.md\", \"artifact_type\": \"self_report\", \"role_owner\": \"coder\", \"retry_policy\": \"create_fresh_per_attempt\"}], \"non_goals\": [\"No second replay under this authority\"], \"verification\": [\"python scripts/acquire_ledger.py --preflight\"], \"opening_gates\": [{\"kind\": \"owner_note\", \"reference\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\"}], \"external_inputs\": \"none\", \"candidate_identity\": \"none\", \"correction\": {\"findings\": [{\"id\": \"AL2-F1\", \"violated_invariant\": \"a no-ledger project carries no ledger row\", \"prior_disposition\": \"open\", \"authority_action\": \"owner note 003 authorizes exactly one bounded replay\", \"coder_obligation\": \"re-acquire the ledger under the frozen envelope and cite the rows\", \"closure_proof\": \"nine admitted rows per arm in joined_ledger.json\"}], \"prior_evidence\": [{\"path\": \"01_data/evidence/m002_s02_attempt_001/partial_ledger.json\", \"sha256\": \"86280bba7767b720889ba85f923ca185853de126e2b72874e0c463682eb1f4a0\"}], \"controlling_ruling\": \"05_governance/human_owner_notes/003_m002_s02_authority.md\", \"closure_proof\": [\"Nine admitted rows per arm, or a preserved partial stop with the exact exception\"], \"claims_withdrawn\": \"none\", \"evidence_invalidated\": \"none\", \"minimum_rerun_set\": [\"the nine-case paired replay\"]}, \"execution_envelope\": \"none\", \"objective\": {\"success_criteria\": [\"Nine exact ledger rows per arm are admitted\"], \"closure_proof\": [\"joined_ledger.json with nine rows per arm\"]}, \"definition_of_done\": [\"Joined ledger written at the resolved evidence path\", \"Attempt-qualified self-report written\"]}}\n",
+      "verb": "corrective-publish"
+    }
+  ],
+  "schema": "frutlups.drive_seam_cases.v1",
+  "version": 1
+}

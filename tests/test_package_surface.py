@@ -116,6 +116,7 @@ class ExportPolicyTests(unittest.TestCase):
                 "py.typed",
                 "reconciliation.py",
                 "runstore.py",
+                "seam_consumer.py",
                 "supervisor.py",
                 "telemetry.py",
                 "verifier.py",

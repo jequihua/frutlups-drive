@@ -1,0 +1,26 @@
+{
+  "members": [
+    {
+      "path": "08_pkg/tests/fixtures/drive_seam_v1/dry_run_cases.json",
+      "sha256": "847c75fb351895b99aca8465ba62b31d73b3e3292045647a7c99c49fc4ae940f"
+    },
+    {
+      "path": "08_pkg/tests/fixtures/drive_seam_v1/frontier_cases.json",
+      "sha256": "aafcc669135d3ef700a5d29309c16f169113855e703302fda413813b3e656cff"
+    },
+    {
+      "path": "08_pkg/tests/fixtures/drive_seam_v1/payload_cases.json",
+      "sha256": "3db18b8a096678dc60e158265b2b5abeccd8c74b9860cc454583b977d84f3908"
+    },
+    {
+      "path": "08_pkg/tests/fixtures/drive_seam_v1/publication_cases.json",
+      "sha256": "25cac4e8bc6bd737b0a0ad09406148451bc2670fda9f21ad2a11f0a78f9c6523"
+    },
+    {
+      "path": "08_pkg/tests/fixtures/drive_seam_v1/refusal_cases.json",
+      "sha256": "8b67d8686ba955d94df346348f9f74d0a24eb4f084fd266c4314b67d1e18d27c"
+    }
+  ],
+  "schema": "frutlups.drive_seam_fixture_manifest.v1",
+  "version": 1
+}

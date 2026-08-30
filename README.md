@@ -51,6 +51,31 @@ python -m frutlups_drive report <project> <run_id> [--json]
 `plan` and `report` are read-only. `run`, `resume`, and `stop` require the
 project's policy and applicable local authority declarations.
 
+## frutlups 0.2 seam consumer qualification
+
+The checkout-local `frutlups_drive.seam_consumer` surface provides the typed
+`FrutlupsSeamConsumer`, response admission, and corrective-proposal builder for
+the frozen frutlups 0.2 seam. After binding `$projectPython` and `$seamPython`,
+run its complete offline qualification lane from the repository root. In a
+development checkout, use:
+
+```powershell
+& $projectPython 08_pkg/scripts/verify_frutlups_seam_consumer.py --seam-python $seamPython
+```
+
+In a released front checkout, use:
+
+```powershell
+& $projectPython scripts/verify_frutlups_seam_consumer.py --seam-python $seamPython
+```
+
+The command pins the producer identity and fixture manifest, runs all 22
+consumer tests plus the two-test 73-row live replay, and emits one
+`frutlups-seam-consumer-proof/v1` summary. It dispatches no provider seat and
+writes only inside test temporary roots. This qualified surface is parallel to
+the operational loop: planning and status observation remain on released
+frutlups 0.1.8 until the separately governed 0.2.0 release adoption.
+
 ## Minimal quickstart
 
 1. Prepare a committed driven project with the released frutlups two-roadmap
