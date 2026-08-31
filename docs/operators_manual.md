@@ -108,6 +108,12 @@ list. And **re-verify tool identities at init, never trust them**: the
 three isolated environments, the BOM-free bindings, and the provider
 CLI logins.
 
+For an ordinary production or pilot project, `no-ledger` means exactly
+that: launch with the reviews INDEX header-only and do not plant test
+rows. A deliberate oracle canary belongs only in an explicitly ruled,
+disposable qualification campaign and must follow the same-run
+reopenability procedure in section 4.
+
 ## 4. Writing the roadmap (milestones made of slices)
 
 Released frutlups uses two plain-Markdown roadmap files as one strict,
@@ -170,6 +176,43 @@ review, and a passing `record-verdict` transaction. Only that accepted
 fresh chain drains the slice from the worklist; an attempted rework or
 historical verdict does not. A `needs_work` verdict produces another
 fresh corrective prompt and review inside the existing caps.
+
+### Qualification canaries must be reopenable in the same run
+
+The oracle detects evidence; it does not make a finding routable. A
+roadmap-valid slice id is therefore not enough for a deliberate holistic
+canary. Drive can reopen that id only after **the current run** has accepted
+the slice into its own journal history. A verdict accepted while preparing
+the fixture, or by a predecessor or earlier run, is historical evidence and
+does not satisfy this rule.
+
+Use this procedure whenever an explicitly authorized qualification campaign
+plants a no-ledger canary such as one controlled INDEX data row:
+
+1. Use a fresh disposable fixture. Keep ordinary production and pilot
+   projects canary-free and their no-ledger INDEX header-only.
+2. Attribute the canary to an exact slice that is **pending at launch**. Do
+   not pre-accept that slice during fixture preparation and do not target a
+   slice accepted by an earlier run.
+3. Start the run at or before that slice, and set the run boundary and slice
+   budget so the same run must implement and accept it before the holistic
+   pass boundary.
+4. Before launch, verify all four facts: planning still reports the intended
+   frontier; the oracle emits exactly the intended canary observation with
+   the exact target id; the target is absent from pre-run accepted history;
+   and the target lies inside this run's planned slice range. Planning plus
+   oracle validation alone is insufficient because neither proves
+   same-run reopenability.
+5. At the non-clean holistic pass, require the finding to carry that exact
+   slice id. The normal rework loop must remove the planted condition,
+   re-accept the slice, and then produce the configured clean passes.
+
+If the canary target is absent from the current run's accepted history, the
+resulting `holistic_findings_unmappable` stop is correct fail-closed behavior.
+Do not edit a verdict, the accepted history, or the run store, and do not
+treat this setup error as an ordinary resume. Preserve the stopped run as
+evidence, correct the campaign design, and—under fresh owner authority—launch
+a fresh fixture/run in which the target begins pending.
 
 Two review-file conventions, enforced end to end since frutlups 0.1.8
 and the matching template pin, exist because a live campaign died
@@ -485,11 +528,14 @@ A sensible first session on a fresh project:
    dispatched. In a mock-configured project it instead says that it planned
    against `.frutlups_drive_mock/script.json`. Fix the roadmap or script until
    the stated observation looks right.
-2. A **mock rehearsal** if you want one: point the policy at mock seats
+2. If this is an explicitly ruled qualification campaign with a deliberate
+   canary, complete section 4's same-run reopenability checks before any live
+   dispatch. Otherwise confirm that a no-ledger reviews INDEX is header-only.
+3. A **mock rehearsal** if you want one: point the policy at mock seats
    and run offline; the loop shape exercises without any spend.
-3. `run <project> --until slice_complete` — the first real slice, then
+4. `run <project> --until slice_complete` — the first real slice, then
    look at everything (section 10) before granting more.
-4. Then `run ... --until roadmap_complete` for full autonomous
+5. Then `run ... --until roadmap_complete` for full autonomous
    milestone execution under your gate's budgets.
 
 Use one stable campaign id for related launches. A policy declaration or
@@ -560,10 +606,13 @@ process.
   `holistic_findings_unmappable` stop (section 4): unroutable holistic
   finding ids, journaled and escalated instead of poisoning the rework
   declaration.
-- The no-ledger pass-boundary oracle bundle is QUIET: zero
-  observations is the healthy baseline, and the observation class you
-  will most likely ever see is the `ledger_row_in_no_ledger_project`
-  tripwire — a data row in an INDEX nobody should be keeping.
+- The no-ledger pass-boundary oracle bundle is QUIET: zero observations is
+  the healthy baseline for every ordinary project. The observation class you
+  will most likely ever see is the `ledger_row_in_no_ledger_project` tripwire
+  — a data row in an INDEX nobody should be keeping. The only planned
+  exception is an explicitly ruled qualification canary prepared under
+  section 4; it must be attributed to a slice accepted by that same run so
+  the finding can enter governed rework.
 
 **Operator surfaces added in version 5**:
 

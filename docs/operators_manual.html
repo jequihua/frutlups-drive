@@ -335,6 +335,11 @@ tripwire fires at every boundary. And re-verify tool identities at init —
 the three isolated environments, BOM-free bindings, provider CLI logins —
 never trust them.
 </div>
+<p>For an ordinary production or pilot project, <code>no-ledger</code> means
+exactly that: launch with the reviews INDEX header-only and do not plant test
+rows. A deliberate oracle canary belongs only in an explicitly ruled,
+disposable qualification campaign and must follow the same-run reopenability
+procedure in section 4.</p>
 </section>
 
 <section id="s4">
@@ -398,6 +403,35 @@ files at exactly the prompt-declared paths.
 After a crash, resume reconciles the pending declaration witness or observes
 the already-ready worklist without declaring twice. Each later non-clean pass
 uses its new pass number and a new append-only declaration.</p>
+<div class="card stop">
+<span class="card-label">Qualification canaries must be reopenable in the same run</span>
+<p>The oracle detects evidence; it does not make a finding routable. A
+roadmap-valid slice id is not enough: drive can reopen a deliberate holistic
+canary target only after <strong>the current run</strong> has accepted that
+slice into its own journal. A fixture-preparation verdict or an acceptance by
+an earlier run is historical and does not qualify.</p>
+<ol>
+<li>Use a fresh disposable fixture. Keep production and pilot projects
+canary-free and their no-ledger INDEX header-only.</li>
+<li>Target an exact slice that is <strong>pending at launch</strong>. Do not
+pre-accept it or target a slice accepted by an earlier run.</li>
+<li>Start at or before that slice, with a boundary and slice budget that make
+the same run accept it before the holistic pass boundary.</li>
+<li>Before launch, verify the intended planning frontier, exactly the intended
+oracle observation and target id, absence of the target from pre-run accepted
+history, and inclusion of the target in this run&rsquo;s planned slice range.
+Planning plus oracle validation alone does not prove reopenability.</li>
+<li>Require the non-clean holistic finding to carry the exact target id. The
+ordinary rework loop must remove the planted condition, re-accept the slice,
+and then produce the configured clean passes.</li>
+</ol>
+<p>If the target is absent from current-run accepted history, a
+<code>holistic_findings_unmappable</code> stop is correct fail-closed behavior.
+Do not edit verdicts, accepted history, or the run store, and do not treat the
+setup error as an ordinary resume. Preserve the evidence and, under fresh
+owner authority, use a corrected fresh fixture/run whose target begins
+pending.</p>
+</div>
 <p>Version 5 makes that lifecycle explicit across runs. Every terminal
 non-repair coder round records a typed <code>ladder_event</code>:
 <code>product_finding</code> counts toward same-invariant recurrence, while
@@ -666,6 +700,9 @@ step, and says it checked <code>planning_frontier</code> plus
 <code>loop_resume</code>. Captures are disposable outside the project and no
 provider seat is dispatched. A mock project instead says it planned against
 <code>.frutlups_drive_mock/script.json</code>.</li>
+<li>If this is an explicitly ruled qualification campaign with a deliberate
+canary, complete section 4&rsquo;s same-run reopenability checks before live
+dispatch. Otherwise confirm that a no-ledger reviews INDEX is header-only.</li>
 <li>A <strong>mock rehearsal</strong> if you want one: point the policy at mock
 seats and run offline; the loop shape exercises without any spend.</li>
 <li><code>run &lt;project&gt; --until slice_complete</code> — the first real
@@ -729,9 +766,11 @@ mandatory three-exit reassessment fork to classify before any resume;
 <code>holistic_finding_unmappable</code> events and the
 <code>holistic_findings_unmappable</code> stop preserve unroutable holistic
 finding ids for human adjudication; and the no-ledger pass-boundary oracle
-bundle is quiet — zero observations is healthy, and a
+bundle is quiet — zero observations is healthy for every ordinary project, and a
 <code>ledger_row_in_no_ledger_project</code> observation means a data row
-appeared in an INDEX nobody should be keeping.</p>
+appeared in an INDEX nobody should be keeping. The only planned exception is
+an explicitly ruled qualification canary prepared under section 4; its target
+must be accepted by that same run so it can enter governed rework.</p>
 <p><strong>Operator surfaces added in version 5</strong>:</p>
 <ul>
 <li>S01&rsquo;s <code>ladder_event</code> names the closed failure class,
