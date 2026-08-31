@@ -71,13 +71,22 @@ class SeamConsumerProofContractTests(unittest.TestCase):
         )
         self.assertIn(development_invocation, readme)
         self.assertIn(front_invocation, readme)
-        self.assertIn("remain on released\nfrutlups 0.1.8", readme)
+        self.assertIn("run on released\nfrutlups 0.2.1", readme)
         if ANSWER_PATH is not None:
+            # The answer is COMPLETED at M010 closure (owner note 056 release
+            # postscript): no placeholder survives and the remote-verified
+            # v0.6.0 identity is pinned exactly.
             answer = ANSWER_PATH.read_text(encoding="utf-8")
-            self.assertEqual(answer.count("**OWNER_COMPLETES_AT_CLOSURE**"), 4)
-            for field in ("Repository", "Version", "Tag object", "Peeled commit"):
-                self.assertIn(f"- {field}: **OWNER_COMPLETES_AT_CLOSURE**", answer)
-            self.assertIn(development_invocation, answer)
+            self.assertEqual(answer.count("OWNER_COMPLETES_AT_CLOSURE"), 0)
+            self.assertIn("github.com/jequihua/frutlups-drive", answer)
+            self.assertIn("frutlups-drive 0.6.0", answer)
+            self.assertIn(
+                "c6a9f685f1b13317f34f548426978dfca9cf9885", answer
+            )
+            self.assertIn(
+                "adf7092f51b2e5cffceba271f9d723f50b0d4028", answer
+            )
+            self.assertIn(front_invocation, answer)
             self.assertIn(
                 "frutlups-drive 0.5.0 is explicitly not\nan answer", answer
             )

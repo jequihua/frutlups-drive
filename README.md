@@ -73,8 +73,9 @@ The command pins the producer identity and fixture manifest, runs all 22
 consumer tests plus the two-test 73-row live replay, and emits one
 `frutlups-seam-consumer-proof/v1` summary. It dispatches no provider seat and
 writes only inside test temporary roots. This qualified surface is parallel to
-the operational loop: planning and status observation remain on released
-frutlups 0.1.8 until the separately governed 0.2.0 release adoption.
+the operational loop: planning and status observation run on released
+frutlups 0.2.1 (adopted 2026-08-31; the observation contract is key-identical
+with the prior 0.2.0 and 0.1.8 baselines).
 
 ## Minimal quickstart
 

@@ -6,7 +6,7 @@ frutlups, and frutlups-drive.
 
 Current through version 6 (M010) and the 2026-08-31 frutlups adoption:
 frutlups-drive is published as 0.6.0 (tag `v0.6.0`), with released
-frutlups 0.2.0 as the operational planning baseline, released llloom
+frutlups 0.2.1 as the operational planning baseline, released llloom
 0.1.2, and template v3.1.0.
 Sections first written at version 1 remain
 accurate unless a later-version delta below says otherwise. Where a
@@ -120,7 +120,7 @@ Released frutlups uses two plain-Markdown roadmap files as one strict,
 parseable contract. The **active roadmap** carries the milestone inventory
 and statuses. The sibling **development roadmap** carries the `Slices:`
 bullet breakdown that lets frutlups derive the slice frontier. Do not collapse
-the pair into one file: released frutlups (0.1.4 through 0.2.0) does not derive
+the pair into one file: released frutlups (0.1.4 through 0.2.1) does not derive
 a planning frontier from that single-file shape. Since frutlups
 0.1.3, generated coding and review prompts are project-derived: the
 frontier milestone's authored Objective, Non-goals, and Verification
@@ -652,8 +652,8 @@ qualification proof (`scripts/verify_frutlups_seam_consumer.py
 operational loop — nothing about running, monitoring, or stopping
 changes for an operator — and it dispatches no provider seat. Since
 2026-08-31 the operational planning baseline itself is released
-frutlups 0.2.0 (the observation contract is key-identical with
-0.1.8, so every procedure in this manual is unchanged; the governed
+frutlups 0.2.1 (the observation contract is key-identical with
+0.2.0 and 0.1.8, so every procedure in this manual is unchanged; the governed
 interpreter binding in the execution-environment record is the
 authority).
 
