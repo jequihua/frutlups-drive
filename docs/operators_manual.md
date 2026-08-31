@@ -4,9 +4,10 @@ A human-friendly guide to opening, initializing, and executing a fully
 autonomous, milestone-structured development project with template v3,
 frutlups, and frutlups-drive.
 
-Current through the version 5 implementation (M009; closure and publication
-remain separate owner-ruled steps): frutlups-drive is still packaged as 0.4.0,
-with released frutlups 0.1.8, released llloom 0.1.2, and template v3.1.0.
+Current through version 6 (M010) and the 2026-08-31 frutlups adoption:
+frutlups-drive is published as 0.6.0 (tag `v0.6.0`), with released
+frutlups 0.2.0 as the operational planning baseline, released llloom
+0.1.2, and template v3.1.0.
 Sections first written at version 1 remain
 accurate unless a later-version delta below says otherwise. Where a
 step needs a governance decision, the manual says so explicitly:
@@ -113,7 +114,7 @@ Released frutlups uses two plain-Markdown roadmap files as one strict,
 parseable contract. The **active roadmap** carries the milestone inventory
 and statuses. The sibling **development roadmap** carries the `Slices:`
 bullet breakdown that lets frutlups derive the slice frontier. Do not collapse
-the pair into one file: released frutlups (0.1.4 through 0.1.8) does not derive
+the pair into one file: released frutlups (0.1.4 through 0.2.0) does not derive
 a planning frontier from that single-file shape. Since frutlups
 0.1.3, generated coding and review prompts are project-derived: the
 frontier milestone's authored Objective, Non-goals, and Verification
@@ -591,6 +592,21 @@ process.
 - S05 puts `campaign_id` and optional `predecessor_run_id` in manifests and
   start events only when known, then exposes the aggregate campaign report and
   truthful plan observation described in sections 9-10.
+
+**Version 6 delta (M010, the frutlups 0.2 seam consumer)**: the drive
+ships a typed consumer for released frutlups' three subprocess seam
+verbs (`drive-payload`, `drive-frontier`, `corrective-publish`) as
+`frutlups_drive.seam_consumer`, with a one-command offline
+qualification proof (`scripts/verify_frutlups_seam_consumer.py
+--seam-python <producer interpreter>` in a released checkout;
+`08_pkg/scripts/...` in development). This surface is PARALLEL to the
+operational loop — nothing about running, monitoring, or stopping
+changes for an operator — and it dispatches no provider seat. Since
+2026-08-31 the operational planning baseline itself is released
+frutlups 0.2.0 (the observation contract is key-identical with
+0.1.8, so every procedure in this manual is unchanged; the governed
+interpreter binding in the execution-environment record is the
+authority).
 
 **The kill switch**: `stop <project>` writes a STOP sentinel; the
 supervisor halts at the next safe point (including mid-backoff) with a
